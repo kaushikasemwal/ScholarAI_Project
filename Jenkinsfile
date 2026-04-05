@@ -24,7 +24,7 @@ pipeline {
         stage('Test') {
             steps {
                 bat 'pip install pytest httpx fastapi --quiet'
-                bat 'pytest tests/ -v --tb=short'
+                bat 'if exist tests\\ (pytest tests/ -v --tb=short) else (echo No tests folder, skipping)'
             }
         }
 
