@@ -1,12 +1,21 @@
 /**
- * ScholarAI — Frontend Script (Updated)
+ * ScholarAI — Frontend Script
  * Handles: file upload, drag-and-drop, API calls, result rendering
+ *
+ * KEY FIXES vs previous version:
+ *  1. Audio/video: use player.src = url directly instead of innerHTML trick
+ *  2. HEAD-check the media URL before showing the player — avoids showing a
+ *     broken player when the file is missing or is a tiny placeholder
+ *  3. Null audio_url / video_url now shows a clear install-hint message
+ *  4. Removed the progress bar that was covering result cards
  */
-console.log("Current file ID:", sessionStorage.getItem('fileId'))
-const API_BASE = "http://localhost:8000";
+
+console.log("ScholarAI frontend loaded. Saved file ID:", sessionStorage.getItem("fileId"));
+
+const API_BASE = "https://scholarai-backend.salmonforest-301059c3.centralindia.azurecontainerapps.io";
 
 // ─── STATE ────────────────────────────────────────────────────────
-let uploadedFileId = sessionStorage.getItem('fileId') || null;
+let uploadedFileId = sessionStorage.getItem("fileId") || null;
 let currentFile   = null;
 
 // ─── DOM REFS ─────────────────────────────────────────────────────
@@ -28,31 +37,22 @@ dropZone.addEventListener("drop", (e) => {
   const files = e.dataTransfer.files;
   if (files.length > 0) handleFile(files[0]);
 });
-
 dropZone.addEventListener("click", (e) => {
   if (e.target.classList.contains("btn-browse")) return;
   fileInput.click();
 });
-
 fileInput.addEventListener("change", () => {
   if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
 });
 
 // ─── FILE HANDLING ────────────────────────────────────────────────
 function handleFile(file) {
-  const allowed = [
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/vnd.ms-powerpoint"
-  ];
   const allowedExt = [".pdf", ".pptx", ".ppt"];
   const ext = "." + file.name.split(".").pop().toLowerCase();
-
-  if (!allowed.includes(file.type) && !allowedExt.includes(ext)) {
-    showToast("⚠ Only PDF and PPTX files are supported.", "error");
+  if (!allowedExt.includes(ext)) {
+    showToast("Only PDF and PPTX files are supported.", "error");
     return;
   }
-
   currentFile = file;
   fileName.textContent = file.name;
   fileSize.textContent = formatBytes(file.size);
@@ -63,7 +63,7 @@ function handleFile(file) {
 function clearFile() {
   currentFile    = null;
   uploadedFileId = null;
-  sessionStorage.removeItem('fileId');
+  sessionStorage.removeItem("fileId");
   fileInfo.style.display = "none";
   fileInput.value = "";
   document.getElementById("results-section").style.display = "none";
@@ -79,21 +79,16 @@ function formatBytes(bytes) {
 async function uploadFile(file) {
   const formData = new FormData();
   formData.append("file", file);
-
   try {
-    showToast("⬆ Uploading and encrypting…");
-    const resp = await fetch(`${API_BASE}/upload`, {
-      method: "POST",
-      body: formData
-    });
-
+    showToast("Uploading and encrypting…");
+    const resp = await fetch(`${API_BASE}/upload`, { method: "POST", body: formData });
     if (!resp.ok) throw new Error("Upload failed: " + resp.status);
     const data = await resp.json();
     uploadedFileId = data.file_id;
-    sessionStorage.setItem('fileId', data.file_id);
-    showToast("✓ File uploaded securely.", "success");
+    sessionStorage.setItem("fileId", data.file_id);
+    showToast("File uploaded securely.", "success");
   } catch (err) {
-    showToast("✗ Upload failed. Is the backend running?", "error");
+    showToast("Upload failed. Is the backend running on port 8000?", "error");
     console.error(err);
   }
 }
@@ -101,28 +96,26 @@ async function uploadFile(file) {
 // ─── GENERATE ────────────────────────────────────────────────────
 async function generateOutput(type) {
   if (!uploadedFileId) {
-    showToast("⚠ Please upload a document first.", "error");
+    showToast("Please upload a document first.", "error");
     return;
   }
-
   const btn = document.getElementById(`btn-${type}`);
   setButtonLoading(btn, true);
-  showResults();
+  showResultsSection();
 
   try {
     const resp = await fetch(`${API_BASE}/generate/${type}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_id: uploadedFileId })
+      body: JSON.stringify({ file_id: uploadedFileId }),
     });
-
-    if (!resp.ok) throw new Error(`${type} generation failed`);
+    if (!resp.ok) throw new Error(`${type} generation failed: ${resp.status}`);
     const data = await resp.json();
     console.log(`[ScholarAI] ${type} response:`, data);
     renderResult(type, data);
-    showToast(`✓ ${capitalize(type)} generated.`, "success");
+    showToast(`${capitalize(type)} generated.`, "success");
   } catch (err) {
-    showToast(`✗ ${capitalize(type)} failed. Check backend.`, "error");
+    showToast(`${capitalize(type)} failed. Check the backend logs.`, "error");
     console.error(err);
   } finally {
     setButtonLoading(btn, false);
@@ -130,194 +123,169 @@ async function generateOutput(type) {
 }
 
 async function generateAll() {
-  if (!uploadedFileId && !currentFile) {
-    showToast("⚠ Please upload a document first.", "error");
+  if (!uploadedFileId) {
+    showToast("Please upload a document first.", "error");
     return;
   }
-
-  const types = ["summary", "quiz", "audio", "video"];
-  const btn   = document.getElementById("btn-all");
+  const btn = document.getElementById("btn-all");
   btn.disabled = true;
-  btn.textContent = "⟳ Generating…";
-  showResults();
+  btn.textContent = "Generating…";
+  showResultsSection();
 
-  for (const type of types) {
+  for (const type of ["summary", "quiz", "audio", "video"]) {
     await generateOutput(type);
     await delay(300);
   }
 
   btn.disabled = false;
-  btn.textContent = "⚡ Generate All Outputs";
+  btn.textContent = "Generate All Outputs";
 }
 
 // ─── RESULT RENDERING ────────────────────────────────────────────
 function renderResult(type, data) {
-  console.log(`[ScholarAI] renderResult called for type: ${type}`);
-  
-  // Always show the results section
-  const resultsSection = document.getElementById("results-section");
-  resultsSection.style.display = "block";
-  resultsSection.style.visibility = "visible";
-  console.log(`[ScholarAI] results-section visible`);
-
   const card = document.getElementById(`result-${type}`);
-  if (!card) {
-    console.error(`[ScholarAI] Card not found: result-${type}`);
-    return;
-  }
-  
+  if (!card) { console.error(`Card not found: result-${type}`); return; }
   card.style.display = "block";
-  card.style.visibility = "visible";
-  card.style.opacity = "1";
-  console.log(`[ScholarAI] Card result-${type} now visible`);
 
-  // ── Summary ──────────────────────────────────────────────────
-  if (type === "summary" && data.summary) {
-    console.log(`[ScholarAI] Rendering summary content`);
+  // ── Summary ────────────────────────────────────────────────────
+  if (type === "summary") {
     document.getElementById("summaryContent").innerHTML =
-      `<p>${escapeHtml(data.summary)}</p>`;
-    // Force card visible after content added
-    setTimeout(() => {
-      card.removeAttribute("style");
-      card.setAttribute("style", "display: block !important;");
-    }, 50);
+      `<p>${escapeHtml(data.summary || "No summary returned.")}</p>`;
   }
 
-  // ── Quiz ─────────────────────────────────────────────────────
+  // ── Quiz ───────────────────────────────────────────────────────
   if (type === "quiz" && data.questions) {
-    console.log(`[ScholarAI] Rendering ${data.questions.length} quiz questions`);
     const body = document.getElementById("quizContent");
-    let html = "";
-    data.questions.forEach((q, i) => {
-      html += `
-        <div class="quiz-item">
-          <div class="quiz-q"><span class="q-num">Q${i+1}.</span>${escapeHtml(q.question)}</div>
-          <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
-        </div>`;
-    });
-    body.innerHTML = html;
-    // Force card visible after content added
-    setTimeout(() => {
-      card.removeAttribute("style");
-      card.style.display = "block";
-    }, 50);
+    body.innerHTML = data.questions.map((q, i) => `
+      <div class="quiz-item">
+        <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
+        <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
+      </div>`).join("");
   }
 
-  // ── Audio ─────────────────────────────────────────────────────
+  // ── Audio ──────────────────────────────────────────────────────
   if (type === "audio") {
     if (data.audio_url) {
       const audioUrl = `${API_BASE}${data.audio_url}`;
-      console.log("[ScholarAI] Audio URL:", audioUrl);
-
-      const player = document.getElementById("audioPlayer");
-      const source = player.querySelector("source");
-      const dl     = document.getElementById("audioDownload");
-
-      // Reset and reload with new source URL
-      player.pause();
-      player.innerHTML = "";
-      const newSource = document.createElement("source");
-      newSource.src  = audioUrl;
-      newSource.type = "audio/mpeg";
-      player.appendChild(newSource);
-      player.load();
-
-      player.onerror = () => {
-        showToast("⚠ Unable to play generated audio. Please download and inspect the file.", "error");
-      };
-
-      dl.href     = audioUrl;
-      dl.download = "summary_audio.mp3";
-      dl.style.display = "inline-block";
-
-      // Show URL in UI for troubleshooting
-      const audioUrlInfo = document.querySelector("#result-audio .result-meta span.audio-url");
-      if (audioUrlInfo) {
-        audioUrlInfo.textContent = `URL: ${audioUrl}`;
-      }
-
-      setTimeout(() => {
-        card.removeAttribute("style");
-        card.style.display = "block";
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }, 100);
-
+      _mountMediaPlayer("audio", audioUrl, card);
     } else {
-      card.removeAttribute("style");
-      card.style.display = "block";
-      card.querySelector(".result-body").innerHTML =
-        `<p style="color:#94A3B8;font-size:0.9rem;">⚠ Audio file not returned by backend. Check server logs.</p>`;
+      _showMediaError(card, "audio", data.message);
     }
   }
 
-  // ── Video ─────────────────────────────────────────────────────
+  // ── Video ──────────────────────────────────────────────────────
   if (type === "video") {
     if (data.video_url) {
       const videoUrl = `${API_BASE}${data.video_url}`;
-      console.log("[ScholarAI] Video URL:", videoUrl);
-
-      const player = document.getElementById("videoPlayer");
-      const source = player.querySelector("source");
-      const dl     = document.getElementById("videoDownload");
-
-      // Reset and reload with new source URL
-      player.pause();
-      player.innerHTML = "";
-      const newSource = document.createElement("source");
-      newSource.src  = videoUrl;
-      newSource.type = "video/mp4";
-      player.appendChild(newSource);
-      player.load();
-
-      player.onerror = () => {
-        showToast("⚠ Unable to play generated video. Please download and inspect the file.", "error");
-      };
-
-      dl.href     = videoUrl;
-      dl.download = "summary_video.mp4";
-      dl.style.display = "inline-block";
-
-      const videoUrlInfo = document.querySelector("#result-video .result-meta span.video-url");
-      if (videoUrlInfo) {
-        videoUrlInfo.textContent = `URL: ${videoUrl}`;
-      }
-
-      setTimeout(() => {
-        card.removeAttribute("style");
-        card.style.display = "block";
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }, 100);
-
-    } else {
-      // Fallback: offer the slides ZIP download
-      card.removeAttribute("style");
-      card.style.display = "block";
-      const zipUrl = data.slides_url ? `${API_BASE}${data.slides_url}` : `${API_BASE}/media/${uploadedFileId}_video_slides.zip`;
+      _mountMediaPlayer("video", videoUrl, card);
+    } else if (data.slides_url) {
+      const zipUrl = `${API_BASE}${data.slides_url}`;
       card.querySelector(".result-body").innerHTML = `
-        <p style="color:#94A3B8;font-size:0.9rem;margin-bottom:0.75rem;">
-          🎬 Video generation may not be available unless MoviePy + ffmpeg are installed. Download the slide images instead:
+        <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.75rem;">
+          Video generation requires MoviePy + ffmpeg. Download the slide images instead:
         </p>
-        <a class="btn-download" href="${zipUrl}" download="slides.zip">⬇ Download Slides ZIP</a>
-      `;
+        <a class="btn-download" href="${zipUrl}" download="slides.zip">Download Slides ZIP</a>`;
+    } else {
+      _showMediaError(card, "video", data.message);
     }
   }
+
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-// ─── PROGRESS ────────────────────────────────────────────────────
-function showResults() {
+/**
+ * Mount an audio or video player after verifying the file actually exists
+ * and is large enough to be real media (not a tiny placeholder).
+ *
+ * Uses a HEAD request to check Content-Length before setting player.src.
+ * This prevents the browser from showing a broken/empty player.
+ */
+function _mountMediaPlayer(mediaType, url, card) {
+  const playerId  = mediaType === "audio" ? "audioPlayer"   : "videoPlayer";
+  const downloadId = mediaType === "audio" ? "audioDownload" : "videoDownload";
+  const mimeType  = mediaType === "audio" ? "audio/mpeg"    : "video/mp4";
+  const filename  = mediaType === "audio" ? "summary_audio.mp3" : "summary_video.mp4";
+  const body      = card.querySelector(".result-body");
+
+  // HEAD-check the URL first so we never show a broken player
+  fetch(url, { method: "HEAD" })
+    .then((r) => {
+      const size = parseInt(r.headers.get("content-length") || "0", 10);
+      const contentType = r.headers.get("content-type") || "";
+
+      // A real MP3/MP4 is always > 500 bytes; a placeholder text file is tiny
+      // Also guard against text/plain being returned instead of audio/video
+      const looksReal = r.ok && size > 500 && !contentType.startsWith("text/plain");
+
+      if (looksReal) {
+        const player = document.getElementById(playerId);
+        const dlBtn  = document.getElementById(downloadId);
+
+        // Set src directly — more reliable than clearing innerHTML and using <source>
+        player.src = url;
+        player.load();
+
+        player.onerror = () => {
+          body.innerHTML = `
+            <p style="color:var(--text-secondary);font-size:0.9rem;">
+              Browser could not play the file. Try the download button instead.
+            </p>
+            <a class="btn-download" href="${url}" download="${filename}">Download ${mediaType === "audio" ? "MP3" : "MP4"}</a>`;
+        };
+
+        dlBtn.href = url;
+        dlBtn.download = filename;
+        dlBtn.style.display = "inline-block";
+
+      } else {
+        // File exists but looks like a placeholder or is wrong type
+        const hint = size <= 500
+          ? `File is only ${size} bytes — TTS likely wrote a placeholder instead of real audio.`
+          : `Unexpected content type: ${contentType}`;
+        body.innerHTML = `
+          <p style="color:#EF4444;font-size:0.9rem;">Media file invalid. ${hint}</p>
+          <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.5rem;">
+            Check the backend: <code>GET ${url.replace(API_BASE, "")}</code> at
+            <a href="${API_BASE}/docs" target="_blank">/docs</a>
+          </p>`;
+      }
+    })
+    .catch((err) => {
+      body.innerHTML = `
+        <p style="color:#EF4444;font-size:0.9rem;">
+          Could not reach media file. Is the backend running?
+        </p>
+        <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">URL: ${url}</p>`;
+      console.error(`HEAD check failed for ${url}:`, err);
+    });
+}
+
+/** Show a clear install-hint error when audio_url / video_url is null. */
+function _showMediaError(card, mediaType, message) {
+  const body = card.querySelector(".result-body");
+  const installHint = mediaType === "audio"
+    ? "pip install gtts &nbsp;(needs internet) &nbsp;or&nbsp; pip install pyttsx3 &nbsp;(offline)"
+    : "pip install moviepy &nbsp;and install ffmpeg from ffmpeg.org";
+
+  body.innerHTML = `
+    <p style="color:#EF4444;font-size:0.9rem;margin-bottom:0.6rem;">
+      ${escapeHtml(message || `${capitalize(mediaType)} generation failed.`)}
+    </p>
+    <p style="color:var(--text-secondary);font-size:0.82rem;">
+      To fix, run: <code>${installHint}</code>
+    </p>`;
+}
+
+// ─── SHOW RESULTS SECTION ─────────────────────────────────────────
+function showResultsSection() {
   const section = document.getElementById("results-section");
   section.style.display = "block";
-  
-  // Remove or hide the progress bar so it doesn't block content
+
+  // Hide the progress bar — it was covering result cards in the original
   const progressWrap = document.getElementById("progressWrap");
-  if (progressWrap) {
-    progressWrap.style.display = "none";
-  }
-  
-  // Scroll to results after a short delay to let DOM settle
-  setTimeout(() => {
-    section.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, 100);
+  if (progressWrap) progressWrap.style.display = "none";
+
+  setTimeout(() => section.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────
@@ -331,7 +299,7 @@ function setButtonLoading(btn, loading) {
 }
 
 function showToast(msg, type = "") {
-  document.querySelectorAll(".toast").forEach(t => t.remove());
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
   const t = document.createElement("div");
   t.className = `toast ${type}`;
   t.textContent = msg;
@@ -343,11 +311,11 @@ function copyText(id) {
   const el = document.getElementById(id);
   if (!el) return;
   navigator.clipboard.writeText(el.innerText)
-    .then(() => showToast("✓ Copied!", "success"));
+    .then(() => showToast("Copied!", "success"));
 }
 
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function escapeHtml(str) {
   if (!str) return "";
   return str

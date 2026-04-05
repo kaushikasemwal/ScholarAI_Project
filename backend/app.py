@@ -10,6 +10,7 @@ Endpoints:
   POST /generate/audio       → Run text-to-speech
   POST /generate/video       → Run video generation
   GET  /media/{filename}     → Served automatically via StaticFiles mount
+  GET  /media-check/{filename} → Debug: verify file exists + size
   DELETE /cleanup/{file_id}  → Manual cleanup
 
 Author : ScholarAI Project
@@ -41,10 +42,14 @@ log = logging.getLogger(__name__)
 BASE_DIR   = Path(__file__).parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
+
+# Always create dirs before anything else — StaticFiles mount will fail
+# silently if OUTPUT_DIR doesn't exist at startup
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-log.info(f"Output directory: {OUTPUT_DIR}")
+log.info(f"Upload directory : {UPLOAD_DIR} (exists={UPLOAD_DIR.exists()})")
+log.info(f"Output directory : {OUTPUT_DIR} (exists={OUTPUT_DIR.exists()})")
 
 # In-memory store: file_id → { path, created_at, extracted_text }
 FILE_STORE: dict[str, dict] = {}
@@ -68,6 +73,16 @@ app.add_middleware(
 # ─── MODELS ──────────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
     file_id: str
+
+# ─── STARTUP CHECK ───────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_check():
+    """Verify directories exist and log their state at startup."""
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    log.info(f"[startup] uploads dir OK  : {UPLOAD_DIR}")
+    log.info(f"[startup] outputs dir OK  : {OUTPUT_DIR}")
+    log.info("[startup] StaticFiles mount for /media will serve from outputs/")
 
 # ─── BACKGROUND AUTO-CLEANUP ─────────────────────────────────────
 def auto_cleanup_daemon():
@@ -95,6 +110,28 @@ threading.Thread(target=auto_cleanup_daemon, daemon=True).start()
 @app.get("/")
 async def root():
     return {"message": "ScholarAI API is running. See /docs for endpoints."}
+
+
+@app.get("/media-check/{filename}")
+async def media_check(filename: str):
+    """
+    Debug endpoint — verify a media file exists on disk and return its size.
+    Use this from the browser to diagnose 'audio won't play' issues.
+
+    Example: GET /media-check/abc123_audio.mp3
+    """
+    p = OUTPUT_DIR / filename
+    if p.exists():
+        size = p.stat().st_size
+        # A real MP3 from gTTS is always > 1 KB; our placeholder is < 200 bytes
+        is_likely_real = size > 500
+        return {
+            "exists": True,
+            "size_bytes": size,
+            "is_likely_real_audio": is_likely_real,
+            "path": str(p),
+        }
+    return {"exists": False, "filename": filename}
 
 
 @app.post("/upload")
@@ -152,8 +189,10 @@ def _get_text(file_id: str) -> str:
     elif ext == ".pptx":
         text = extract_text_pptx(raw_bytes)
     else:
-        # Realistically the python-pptx library does not support old .ppt format
-        raise HTTPException(400, "Old PowerPoint .ppt format is not supported. Convert to .pptx and retry.")
+        raise HTTPException(
+            400,
+            "Old PowerPoint .ppt format is not supported. Convert to .pptx and retry."
+        )
 
     meta["text"] = text
     log.info(f"Extracted {len(text)} chars from {file_id}")
@@ -180,37 +219,43 @@ async def api_quiz(req: GenerateRequest):
 
 @app.post("/generate/audio")
 async def api_audio(req: GenerateRequest):
-    """Convert summary to speech using gTTS / Coqui TTS."""
+    """
+    Convert summary to speech using gTTS / Coqui TTS / pyttsx3.
+
+    Returns:
+      status "ok"       → real audio file created, audio_url is playable
+      status "failed"   → no TTS engine produced a valid file
+    """
     text = _get_text(req.file_id)
     log.info(f"Generating audio for {req.file_id}")
 
     summary  = generate_summary(text)
     out_path = OUTPUT_DIR / f"{req.file_id}_audio.mp3"
-    generate_audio(summary, str(out_path))
 
-    # Verify file was actually created and has content
-    if out_path.exists() and out_path.stat().st_size > 500:
-        log.info(f"Audio file ready: {out_path} ({out_path.stat().st_size} bytes)")
+    # generate_audio now returns True only when a real audio file (>500 B) exists
+    success = generate_audio(summary, str(out_path))
+
+    if success:
+        size = out_path.stat().st_size
+        log.info(f"Audio ready: {out_path} ({size} bytes)")
         return {
             "file_id":   req.file_id,
             "audio_url": f"/media/{req.file_id}_audio.mp3",
-            "status":    "ok"
+            "status":    "ok",
         }
 
-    if out_path.exists():
-        # A placeholder MP3 may be created even if TTS engines are not installed
-        log.warning(f"Audio file created but below size threshold: {out_path} ({out_path.stat().st_size} bytes)")
-        return {
-            "file_id":   req.file_id,
-            "audio_url": f"/media/{req.file_id}_audio.mp3",
-            "status":    "fallback"
-        }
-
-    log.warning(f"Audio file missing or not created: {out_path}")
+    # Nothing worked — tell the frontend exactly why
+    log.warning(f"Audio generation failed for {req.file_id}")
     return {
         "file_id":   req.file_id,
         "audio_url": None,
-        "status":    "failed"
+        "status":    "failed",
+        "message":   (
+            "No TTS engine produced a valid audio file. "
+            "Make sure gTTS is installed (pip install gtts) "
+            "and that you have an active internet connection, "
+            "or install pyttsx3 for offline TTS."
+        ),
     }
 
 
@@ -224,31 +269,38 @@ async def api_video(req: GenerateRequest):
     out_path = OUTPUT_DIR / f"{req.file_id}_video.mp4"
     generate_video(summary, str(out_path))
 
-    # Check if an MP4 file was created
-    if out_path.exists() and out_path.stat().st_size > 10000:
-        log.info(f"Video file ready: {out_path} ({out_path.stat().st_size} bytes)")
+    # A real MP4 is always several KB; a placeholder text file is tiny
+    if out_path.exists() and out_path.stat().st_size > 10_000:
+        size = out_path.stat().st_size
+        log.info(f"Video ready: {out_path} ({size} bytes)")
         return {
             "file_id":   req.file_id,
             "video_url": f"/media/{req.file_id}_video.mp4",
-            "status":    "ok"
+            "status":    "ok",
         }
 
-    if out_path.exists():
-        # The output may be a placeholder MP4 or text fallback file.
-        log.warning(f"Video file created but below expected size: {out_path} ({out_path.stat().st_size} bytes)")
+    # MoviePy not available — check for slides ZIP fallback
+    zip_path = OUTPUT_DIR / f"{req.file_id}_video_slides.zip"
+    if zip_path.exists():
+        log.info(f"Video not generated; slides ZIP available: {zip_path}")
         return {
-            "file_id":   req.file_id,
-            "video_url": f"/media/{req.file_id}_video.mp4",
-            "status":    "fallback"
+            "file_id":    req.file_id,
+            "video_url":  None,
+            "status":     "slides_only",
+            "slides_url": f"/media/{req.file_id}_video_slides.zip",
+            "message":    "MoviePy/ffmpeg not available. Download slide images instead.",
         }
 
-    # MoviePy not available — slides ZIP was created instead
-    log.warning(f"Video not generated. Slides ZIP available.")
+    log.warning(f"Video generation produced no usable output for {req.file_id}")
     return {
         "file_id":   req.file_id,
         "video_url": None,
-        "status":    "slides_only",
-        "slides_url": f"/media/{req.file_id}_video_slides.zip"
+        "status":    "failed",
+        "message":   (
+            "Video generation failed. "
+            "Install MoviePy and ffmpeg: pip install moviepy && "
+            "download ffmpeg from https://ffmpeg.org and add to PATH."
+        ),
     }
 
 
@@ -269,6 +321,7 @@ async def manual_cleanup(file_id: str):
 
 
 # ─── STATIC FILES (must be LAST) ─────────────────────────────────
-# This serves /media/xxx_audio.mp3 and /media/xxx_video.mp4
-# IMPORTANT: mount AFTER all route definitions
+# Serves /media/xxx_audio.mp3 and /media/xxx_video.mp4
+# IMPORTANT: mount AFTER all route definitions so /media-check route
+# is registered first and is not shadowed by the static mount.
 app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR)), name="media")
