@@ -63,7 +63,7 @@ def _load_autoencoder(input_dim: int = 384):
     """Load or initialize the autoencoder. Tries saved weights first."""
     global _autoencoder
     if _autoencoder is None:
-        from autoencoder import SemanticAutoencoder
+        from .autoencoder import SemanticAutoencoder
         ae = SemanticAutoencoder(input_dim=input_dim, latent_dim=128)
         ae.try_load_weights()
         _autoencoder = ae
