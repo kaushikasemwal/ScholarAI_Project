@@ -11,7 +11,7 @@ python-multipart>=0.0.6       # File upload support for FastAPI
 
 # ── ML Core ─────────────────────────────────────────────────────
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0+cpu
+torch==2.2.0+cpu
 transformers>=4.35.0           # BART, T5 models
 sentence-transformers>=2.2.2   # Sentence-BERT
 datasets>=2.14.0               # Optional: for training data
