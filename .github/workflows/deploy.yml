@@ -17,52 +17,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug - list secrets availability
-        run: |
-          echo "FIREBASE_CONFIG_JSON set: ${{ secrets.FIREBASE_CONFIG_JSON != '' }}"
-          echo "HF_SPACE_URL set: ${{ secrets.HF_SPACE_URL != '' }}"
-
       - name: Write firebase-config.js
-        run: |
-          FIREBASE_JSON='${{ secrets.FIREBASE_CONFIG_JSON }}'
-          if [ -z "$FIREBASE_JSON" ]; then
-            FIREBASE_JSON='{"apiKey":"REPLACE_ME","authDomain":"REPLACE_ME","projectId":"REPLACE_ME","storageBucket":"REPLACE_ME","messagingSenderId":"REPLACE_ME","appId":"REPLACE_ME"}'
-          fi
-          python3 -c "
-          import os, json
-          cfg = os.environ.get('FIREBASE_JSON', '')
-          lines = [
-            'import { initializeApp } from \"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js\";',
-            'import { getAuth, GoogleAuthProvider } from \"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js\";',
-            'import { getFirestore } from \"https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js\";',
-            f'const firebaseConfig = {cfg};',
-            'const app = initializeApp(firebaseConfig);',
-            'const auth = getAuth(app);',
-            'const db = getFirestore(app);',
-            'const provider = new GoogleAuthProvider();',
-            'export { auth, db, provider };',
-          ]
-          open('frontend/firebase-config.js', 'w').write('\n'.join(lines))
-          print('firebase-config.js written')
-          " 
         env:
           FIREBASE_JSON: ${{ secrets.FIREBASE_CONFIG_JSON }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          cfg = os.environ.get('FIREBASE_JSON', '{}')
+          if not cfg or cfg == '{}':
+              cfg = '{"apiKey":"REPLACE_ME","authDomain":"REPLACE_ME","projectId":"REPLACE_ME","storageBucket":"REPLACE_ME","messagingSenderId":"REPLACE_ME","appId":"REPLACE_ME"}'
+          content = '\n'.join([
+              'import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";',
+              'import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";',
+              'import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";',
+              f'const firebaseConfig = {cfg};',
+              'const app = initializeApp(firebaseConfig);',
+              'const auth = getAuth(app);',
+              'const db = getFirestore(app);',
+              'const provider = new GoogleAuthProvider();',
+              'export { auth, db, provider };',
+          ])
+          with open('frontend/firebase-config.js', 'w') as f:
+              f.write(content)
+          print('firebase-config.js written OK')
+          PYEOF
 
       - name: Set API base URL
+        env:
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          HF_URL="${{ secrets.HF_SPACE_URL }}"
-          if [ -n "$HF_URL" ]; then
-            sed -i "s|http://localhost:8000|$HF_URL|g" frontend/script.js
-            echo "API_BASE updated to $HF_URL"
+          if [ -n "$HF_SPACE_URL" ]; then
+            sed -i "s|http://localhost:8000|$HF_SPACE_URL|g" frontend/script.js
+            echo "API_BASE set to $HF_SPACE_URL"
           fi
 
+      # Use JamesIves/github-pages-deploy-action which supports Node 24
       - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+        uses: JamesIves/github-pages-deploy-action@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./frontend
-          publish_branch: gh-pages
-          force_orphan: true
+          folder: frontend
+          branch: gh-pages
+          clean: true
 
   deploy-backend:
     name: Deploy Backend to Hugging Face Spaces
@@ -73,10 +68,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Push to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
         run: |
-          HF_TOKEN="${{ secrets.HF_TOKEN }}"
-          HF_SPACE_ID="${{ secrets.HF_SPACE_ID }}"
-
           if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE_ID" ]; then
             echo "HF secrets not set, skipping."
             exit 0
@@ -85,7 +80,10 @@ jobs:
           git config --global user.email "deploy@scholarai"
           git config --global user.name "ScholarAI Deploy"
 
-          git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}" hf_space
+          # Verbose clone to see exact error
+          git clone --verbose \
+            "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}" \
+            hf_space || { echo "Clone failed — check HF_TOKEN and HF_SPACE_ID"; exit 1; }
 
           rsync -av \
             --exclude='.git' \
