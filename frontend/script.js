@@ -312,7 +312,7 @@ async function saveToFirestore(fields) {
   catch (err) { console.warn("Firestore save failed:", err); }
 }
 
-// ─── HISTORY ─────────────────────────────────────────────────────
+// ─── HISTORY (compact — just shows count badge in header) ─────────
 async function loadHistory() {
   if (!currentUser) return;
   try {
@@ -322,103 +322,34 @@ async function loadHistory() {
       orderBy("createdAt", "desc")
     );
     const snapshot = await getDocs(q);
-    const sessions = [];
-    snapshot.forEach((d) => sessions.push({ id: d.id, ...d.data() }));
-    if (sessions.length === 0) return;
-
-    document.getElementById("history-section").style.display = "block";
-    document.getElementById("historyGrid").innerHTML = sessions.map((s, idx) => {
-      const date = s.createdAt?.toDate
-        ? s.createdAt.toDate().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-        : "Unknown date";
-      window._sessionCache = window._sessionCache || {};
-      window._sessionCache[idx] = s;
-      return `
-        <a class="history-card" href="notes.html?id=${s.id}">
-          <div class="history-card-icon">📄</div>
-          <div class="history-card-info">
-            <div class="history-card-name">${escapeHtml(s.fileName || "Untitled")}</div>
-            <div class="history-card-date">${date}</div>
-            <div class="history-card-badges">
-              ${s.summary  ? '<span class="badge badge-green">Summary</span>' : ""}
-              ${s.quiz     ? '<span class="badge badge-blue">Quiz</span>'    : ""}
-              ${s.audioB64 ? '<span class="badge badge-amber">Audio</span>'  : ""}
-              ${s.videoUrl ? '<span class="badge badge-teal">Video</span>'   : ""}
-            </div>
-          </div>
-          <div class="history-card-arrow">→</div>
-        </a>`;
-    }).join("");
+    const count = snapshot.size;
+    if (count > 0) {
+      const btn = document.querySelector(".btn-my-notes");
+      if (btn) btn.textContent = `📚 My Notes (${count})`;
+    }
   } catch (err) {
-    // If index isn't created yet, Firestore throws with a link to create it
     if (err.message?.includes("index")) {
-      console.warn("Firestore index needed. Check the console link to create it:", err);
-    } else {
-      console.warn("Could not load history:", err);
+      console.warn("Firestore index needed:", err);
     }
   }
 }
 
-window.restoreSession = function (session) {
-  showResultsSection();
-
-  if (session.summary) {
-    document.getElementById("result-summary").style.display = "block";
-    document.getElementById("summaryContent").innerHTML =
-      `<p>${escapeHtml(session.summary)}</p>`;
-  }
-
-  if (session.quiz?.length) {
-    document.getElementById("result-quiz").style.display = "block";
-    window._quizData = session.quiz;
-    document.getElementById("quizContent").innerHTML =
-      session.quiz.map((q, i) => `
-        <div class="quiz-preview-item">
-          <span class="q-num">Q${i + 1}.</span>
-          <span>${escapeHtml(q.question)}</span>
-        </div>`).join("");
-    document.getElementById("btnStartQuiz").style.display = "inline-flex";
-  }
-
-  if (session.audioB64) {
-    const card = document.getElementById("result-audio");
-    card.style.display = "block";
-    // Play directly from base64 — no server needed
-    mountPlayer("audio", session.audioB64, card);
-  }
-
-  if (session.videoUrl) {
-    const card = document.getElementById("result-video");
-    card.style.display = "block";
-    const body = card.querySelector(".result-body");
-    // Video URL may have expired — show player but with a re-generate hint
-    body.innerHTML = `
-      <video controls class="video-player" id="videoPlayer" preload="metadata">
-        Your browser does not support HTML5 video.
-      </video>
-      <a class="btn-download" id="videoDownload" href="${session.videoUrl}" download style="display:inline-block">
-        ⬇ Download MP4
-      </a>
-      <p class="video-expire-note">
-        ⚠ Video links may expire. If it doesn't play, re-upload the file and regenerate.
-      </p>`;
-    const player = body.querySelector("#videoPlayer");
-    player.src = session.videoUrl;
-    player.load();
-  }
-
-  showToast(`Restored: ${session.fileName}`, "success");
-  document.getElementById("results-section").scrollIntoView({ behavior: "smooth" });
-};
-
 // ─── HELPERS ─────────────────────────────────────────────────────
 function showResultsSection() {
-  document.getElementById("results-section").style.display = "block";
+  // Results now live on notes.html — nothing to show inline
 }
 
 function showViewNotesBtn() {
-  let btn = document.getElementById("viewNotesBtn");
-  if (btn) return; // already shown
+  const container = document.getElementById("viewNotesContainer");
+  if (!container || document.getElementById("viewNotesBtn")) return;
+  const div = document.createElement("div");
+  div.id = "viewNotesBtn";
+  div.className = "view-notes-banner";
+  div.innerHTML = `
+    <span>✅ Content saved to your account.</span>
+    <a href="notes.html?id=${currentDocRef.id}" class="btn-view-notes">View Full Notes →</a>`;
+  container.appendChild(div);
+}  if (btn) return; // already shown
   btn = document.createElement("div");
   btn.id = "viewNotesBtn";
   btn.className = "view-notes-banner";
