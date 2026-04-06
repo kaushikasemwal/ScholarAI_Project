@@ -186,12 +186,12 @@ def _get_text(file_id: str) -> str:
 
     if ext == ".pdf":
         text = extract_text_pdf(raw_bytes)
-    elif ext == ".pptx":
+    elif ext in (".pptx", ".ppt"):
         text = extract_text_pptx(raw_bytes)
     else:
         raise HTTPException(
             400,
-            "Old PowerPoint .ppt format is not supported. Convert to .pptx and retry."
+            f"Unsupported file extension: {ext}. Please upload a PDF or PPTX."
         )
 
     meta["text"] = text

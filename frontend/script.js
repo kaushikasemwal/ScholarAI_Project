@@ -1,22 +1,53 @@
 /**
- * ScholarAI — Frontend Script
- * Handles: file upload, drag-and-drop, API calls, result rendering
- *
- * KEY FIXES vs previous version:
- *  1. Audio/video: use player.src = url directly instead of innerHTML trick
- *  2. HEAD-check the media URL before showing the player — avoids showing a
- *     broken player when the file is missing or is a tiny placeholder
- *  3. Null audio_url / video_url now shows a clear install-hint message
- *  4. Removed the progress bar that was covering result cards
+ * ScholarAI — Main App Script
+ * Free-tier Firebase: Auth + Firestore only (no Storage).
+ * Audio is persisted as base64 in Firestore.
+ * Video URL is stored as a string; re-generate button shown if expired.
  */
 
-console.log("ScholarAI frontend loaded. Saved file ID:", sessionStorage.getItem("fileId"));
+import { auth, db, provider } from "./firebase-config.js";
+import {
+  onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import {
+  collection, addDoc, getDocs, updateDoc,
+  query, where, orderBy, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-const API_BASE = "https://scholarai-backend.salmonforest-301059c3.centralindia.azurecontainerapps.io";
+// Switch to your deployed URL when running in production
+const API_BASE = "http://localhost:8000";
 
 // ─── STATE ────────────────────────────────────────────────────────
-let uploadedFileId = sessionStorage.getItem("fileId") || null;
-let currentFile   = null;
+let currentUser    = null;
+let uploadedFileId = null;
+let currentDocRef  = null;
+let currentFile    = null;
+
+// ─── AUTH GUARD ───────────────────────────────────────────────────
+onAuthStateChanged(auth, async (user) => {
+  if (!user) { window.location.href = "login.html"; return; }
+  currentUser = user;
+  showUserInfo(user);
+  await loadHistory();
+});
+
+function showUserInfo(user) {
+  const pill   = document.getElementById("userPill");
+  const avatar = document.getElementById("userAvatar");
+  const name   = document.getElementById("userName");
+
+  if (user.photoURL) avatar.src = user.photoURL;
+  else avatar.style.display = "none";
+
+  name.textContent = user.displayName || user.email.split("@")[0];
+  pill.style.display = "flex";
+  document.getElementById("signOutBtn").style.display = "inline-block";
+}
+
+window.handleSignOut = async function () {
+  await signOut(auth);
+  window.location.href = "login.html";
+};
 
 // ─── DOM REFS ─────────────────────────────────────────────────────
 const dropZone  = document.getElementById("dropZone");
@@ -27,15 +58,12 @@ const fileSize  = document.getElementById("fileSize");
 
 // ─── DRAG-AND-DROP ────────────────────────────────────────────────
 dropZone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropZone.classList.add("drag-over");
+  e.preventDefault(); dropZone.classList.add("drag-over");
 });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
 dropZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropZone.classList.remove("drag-over");
-  const files = e.dataTransfer.files;
-  if (files.length > 0) handleFile(files[0]);
+  e.preventDefault(); dropZone.classList.remove("drag-over");
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
 });
 dropZone.addEventListener("click", (e) => {
   if (e.target.classList.contains("btn-browse")) return;
@@ -47,11 +75,9 @@ fileInput.addEventListener("change", () => {
 
 // ─── FILE HANDLING ────────────────────────────────────────────────
 function handleFile(file) {
-  const allowedExt = [".pdf", ".pptx", ".ppt"];
   const ext = "." + file.name.split(".").pop().toLowerCase();
-  if (!allowedExt.includes(ext)) {
-    showToast("Only PDF and PPTX files are supported.", "error");
-    return;
+  if (![".pdf", ".pptx", ".ppt"].includes(ext)) {
+    showToast("Only PDF and PPTX files are supported.", "error"); return;
   }
   currentFile = file;
   fileName.textContent = file.name;
@@ -60,19 +86,17 @@ function handleFile(file) {
   uploadFile(file);
 }
 
-function clearFile() {
-  currentFile    = null;
-  uploadedFileId = null;
-  sessionStorage.removeItem("fileId");
+window.clearFile = function () {
+  currentFile = null; uploadedFileId = null; currentDocRef = null;
   fileInfo.style.display = "none";
   fileInput.value = "";
   document.getElementById("results-section").style.display = "none";
-}
+};
 
-function formatBytes(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+function formatBytes(b) {
+  if (b < 1024) return b + " B";
+  if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+  return (b / 1048576).toFixed(1) + " MB";
 }
 
 // ─── UPLOAD ──────────────────────────────────────────────────────
@@ -85,19 +109,31 @@ async function uploadFile(file) {
     if (!resp.ok) throw new Error("Upload failed: " + resp.status);
     const data = await resp.json();
     uploadedFileId = data.file_id;
-    sessionStorage.setItem("fileId", data.file_id);
+
+    // Create Firestore session document
+    currentDocRef = await addDoc(collection(db, "sessions"), {
+      uid:       currentUser.uid,
+      fileId:    data.file_id,
+      fileName:  file.name,
+      fileSize:  file.size,
+      createdAt: serverTimestamp(),
+      summary:   null,
+      quiz:      null,
+      audioB64:  null,   // base64-encoded MP3
+      videoUrl:  null,   // backend URL (best-effort persistence)
+    });
+
     showToast("File uploaded securely.", "success");
   } catch (err) {
-    showToast("Upload failed. Is the backend running on port 8000?", "error");
+    showToast("Upload failed. Is the backend running?", "error");
     console.error(err);
   }
 }
 
 // ─── GENERATE ────────────────────────────────────────────────────
-async function generateOutput(type) {
+window.generateOutput = async function (type) {
   if (!uploadedFileId) {
-    showToast("Please upload a document first.", "error");
-    return;
+    showToast("Please upload a document first.", "error"); return;
   }
   const btn = document.getElementById(`btn-${type}`);
   setButtonLoading(btn, true);
@@ -111,8 +147,7 @@ async function generateOutput(type) {
     });
     if (!resp.ok) throw new Error(`${type} generation failed: ${resp.status}`);
     const data = await resp.json();
-    console.log(`[ScholarAI] ${type} response:`, data);
-    renderResult(type, data);
+    await renderResult(type, data);
     showToast(`${capitalize(type)} generated.`, "success");
   } catch (err) {
     showToast(`${capitalize(type)} failed. Check the backend logs.`, "error");
@@ -120,175 +155,254 @@ async function generateOutput(type) {
   } finally {
     setButtonLoading(btn, false);
   }
-}
+};
 
-async function generateAll() {
+window.generateAll = async function () {
   if (!uploadedFileId) {
-    showToast("Please upload a document first.", "error");
-    return;
+    showToast("Please upload a document first.", "error"); return;
   }
   const btn = document.getElementById("btn-all");
-  btn.disabled = true;
-  btn.textContent = "Generating…";
+  btn.disabled = true; btn.textContent = "Generating…";
   showResultsSection();
-
   for (const type of ["summary", "quiz", "audio", "video"]) {
-    await generateOutput(type);
+    await window.generateOutput(type);
     await delay(300);
   }
-
-  btn.disabled = false;
-  btn.textContent = "Generate All Outputs";
-}
+  btn.disabled = false; btn.textContent = "⚡ Generate All Outputs";
+};
 
 // ─── RESULT RENDERING ────────────────────────────────────────────
-function renderResult(type, data) {
+async function renderResult(type, data) {
   const card = document.getElementById(`result-${type}`);
-  if (!card) { console.error(`Card not found: result-${type}`); return; }
+  if (!card) return;
   card.style.display = "block";
 
-  // ── Summary ────────────────────────────────────────────────────
   if (type === "summary") {
     document.getElementById("summaryContent").innerHTML =
       `<p>${escapeHtml(data.summary || "No summary returned.")}</p>`;
+    await saveToFirestore({ summary: data.summary || "" });
   }
 
-  // ── Quiz ───────────────────────────────────────────────────────
   if (type === "quiz" && data.questions) {
-    const body = document.getElementById("quizContent");
-    body.innerHTML = data.questions.map((q, i) => `
-      <div class="quiz-item">
-        <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
-        <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
-      </div>`).join("");
+    document.getElementById("quizContent").innerHTML =
+      data.questions.map((q, i) => `
+        <div class="quiz-item">
+          <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
+          <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
+        </div>`).join("");
+    await saveToFirestore({ quiz: data.questions });
   }
 
-  // ── Audio ──────────────────────────────────────────────────────
   if (type === "audio") {
     if (data.audio_url) {
-      const audioUrl = `${API_BASE}${data.audio_url}`;
-      _mountMediaPlayer("audio", audioUrl, card);
+      const backendUrl = `${API_BASE}${data.audio_url}`;
+      mountPlayer("audio", backendUrl, card);
+
+      // Fetch and store as base64 in Firestore for persistence
+      saveAudioAsBase64(backendUrl);
     } else {
-      _showMediaError(card, "audio", data.message);
+      showMediaError(card, "audio", data.message);
     }
   }
 
-  // ── Video ──────────────────────────────────────────────────────
   if (type === "video") {
     if (data.video_url) {
-      const videoUrl = `${API_BASE}${data.video_url}`;
-      _mountMediaPlayer("video", videoUrl, card);
+      const backendUrl = `${API_BASE}${data.video_url}`;
+      mountPlayer("video", backendUrl, card);
+      await saveToFirestore({ videoUrl: backendUrl });
     } else if (data.slides_url) {
-      const zipUrl = `${API_BASE}${data.slides_url}`;
       card.querySelector(".result-body").innerHTML = `
         <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:0.75rem;">
-          Video generation requires MoviePy + ffmpeg. Download the slide images instead:
+          MoviePy + ffmpeg not available. Download slide images instead:
         </p>
-        <a class="btn-download" href="${zipUrl}" download="slides.zip">Download Slides ZIP</a>`;
+        <a class="btn-download" href="${API_BASE}${data.slides_url}" download="slides.zip">
+          Download Slides ZIP
+        </a>`;
     } else {
-      _showMediaError(card, "video", data.message);
+      showMediaError(card, "video", data.message);
     }
   }
 
   card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-/**
- * Mount an audio or video player after verifying the file actually exists
- * and is large enough to be real media (not a tiny placeholder).
- *
- * Uses a HEAD request to check Content-Length before setting player.src.
- * This prevents the browser from showing a broken/empty player.
- */
-function _mountMediaPlayer(mediaType, url, card) {
-  const playerId  = mediaType === "audio" ? "audioPlayer"   : "videoPlayer";
-  const downloadId = mediaType === "audio" ? "audioDownload" : "videoDownload";
-  const mimeType  = mediaType === "audio" ? "audio/mpeg"    : "video/mp4";
-  const filename  = mediaType === "audio" ? "summary_audio.mp3" : "summary_video.mp4";
-  const body      = card.querySelector(".result-body");
+// ─── AUDIO → BASE64 → FIRESTORE ──────────────────────────────────
+async function saveAudioAsBase64(url) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    if (blob.size < 500) return; // placeholder, skip
 
-  // HEAD-check the URL first so we never show a broken player
-  fetch(url, { method: "HEAD" })
-    .then((r) => {
-      const size = parseInt(r.headers.get("content-length") || "0", 10);
-      const contentType = r.headers.get("content-type") || "";
+    // Firestore document limit is 1MB per field.
+    // Typical gTTS summary audio is 50–200KB — well within limit.
+    if (blob.size > 900_000) {
+      console.warn("Audio too large for Firestore, storing URL only.");
+      await saveToFirestore({ videoUrl: url });
+      return;
+    }
 
-      // A real MP3/MP4 is always > 500 bytes; a placeholder text file is tiny
-      // Also guard against text/plain being returned instead of audio/video
-      const looksReal = r.ok && size > 500 && !contentType.startsWith("text/plain");
-
-      if (looksReal) {
-        const player = document.getElementById(playerId);
-        const dlBtn  = document.getElementById(downloadId);
-
-        // Set src directly — more reliable than clearing innerHTML and using <source>
-        player.src = url;
-        player.load();
-
-        player.onerror = () => {
-          body.innerHTML = `
-            <p style="color:var(--text-secondary);font-size:0.9rem;">
-              Browser could not play the file. Try the download button instead.
-            </p>
-            <a class="btn-download" href="${url}" download="${filename}">Download ${mediaType === "audio" ? "MP3" : "MP4"}</a>`;
-        };
-
-        dlBtn.href = url;
-        dlBtn.download = filename;
-        dlBtn.style.display = "inline-block";
-
-      } else {
-        // File exists but looks like a placeholder or is wrong type
-        const hint = size <= 500
-          ? `File is only ${size} bytes — TTS likely wrote a placeholder instead of real audio.`
-          : `Unexpected content type: ${contentType}`;
-        body.innerHTML = `
-          <p style="color:#EF4444;font-size:0.9rem;">Media file invalid. ${hint}</p>
-          <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.5rem;">
-            Check the backend: <code>GET ${url.replace(API_BASE, "")}</code> at
-            <a href="${API_BASE}/docs" target="_blank">/docs</a>
-          </p>`;
-      }
-    })
-    .catch((err) => {
-      body.innerHTML = `
-        <p style="color:#EF4444;font-size:0.9rem;">
-          Could not reach media file. Is the backend running?
-        </p>
-        <p style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.4rem;">URL: ${url}</p>`;
-      console.error(`HEAD check failed for ${url}:`, err);
-    });
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64 = reader.result; // "data:audio/mpeg;base64,..."
+      await saveToFirestore({ audioB64: base64 });
+    };
+    reader.readAsDataURL(blob);
+  } catch (err) {
+    console.warn("Could not save audio to Firestore:", err.message);
+  }
 }
 
-/** Show a clear install-hint error when audio_url / video_url is null. */
-function _showMediaError(card, mediaType, message) {
-  const body = card.querySelector(".result-body");
-  const installHint = mediaType === "audio"
-    ? "pip install gtts &nbsp;(needs internet) &nbsp;or&nbsp; pip install pyttsx3 &nbsp;(offline)"
-    : "pip install moviepy &nbsp;and install ffmpeg from ffmpeg.org";
+// ─── MEDIA PLAYER ────────────────────────────────────────────────
+function mountPlayer(type, url, card) {
+  const isAudio  = type === "audio";
+  const playerId = isAudio ? "audioPlayer"   : "videoPlayer";
+  const dlId     = isAudio ? "audioDownload" : "videoDownload";
+  const player   = document.getElementById(playerId);
+  const dlBtn    = document.getElementById(dlId);
 
-  body.innerHTML = `
+  player.src = url;
+  player.load();
+  player.style.display = "block";
+
+  player.onerror = () => {
+    card.querySelector(".result-body").innerHTML = `
+      <p style="color:#EF4444;font-size:0.9rem;">
+        Could not play the file. Try downloading it directly.
+      </p>
+      <a class="btn-download" href="${url}" download>
+        Download ${isAudio ? "MP3" : "MP4"}
+      </a>`;
+  };
+
+  dlBtn.href = url;
+  dlBtn.download = isAudio ? "summary_audio.mp3" : "summary_video.mp4";
+  dlBtn.style.display = "inline-block";
+}
+
+function showMediaError(card, type, message) {
+  const hint = type === "audio"
+    ? "pip install gtts (needs internet) or pip install pyttsx3 (offline)"
+    : "pip install moviepy and install ffmpeg from ffmpeg.org";
+  card.querySelector(".result-body").innerHTML = `
     <p style="color:#EF4444;font-size:0.9rem;margin-bottom:0.6rem;">
-      ${escapeHtml(message || `${capitalize(mediaType)} generation failed.`)}
+      ${escapeHtml(message || `${capitalize(type)} generation failed.`)}
     </p>
     <p style="color:var(--text-secondary);font-size:0.82rem;">
-      To fix, run: <code>${installHint}</code>
+      To fix: <code>${hint}</code>
     </p>`;
 }
 
-// ─── SHOW RESULTS SECTION ─────────────────────────────────────────
-function showResultsSection() {
-  const section = document.getElementById("results-section");
-  section.style.display = "block";
-
-  // Hide the progress bar — it was covering result cards in the original
-  const progressWrap = document.getElementById("progressWrap");
-  if (progressWrap) progressWrap.style.display = "none";
-
-  setTimeout(() => section.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+// ─── FIRESTORE SAVE ──────────────────────────────────────────────
+async function saveToFirestore(fields) {
+  if (!currentDocRef) return;
+  try { await updateDoc(currentDocRef, fields); }
+  catch (err) { console.warn("Firestore save failed:", err); }
 }
 
+// ─── HISTORY ─────────────────────────────────────────────────────
+async function loadHistory() {
+  if (!currentUser) return;
+  try {
+    const q = query(
+      collection(db, "sessions"),
+      where("uid", "==", currentUser.uid),
+      orderBy("createdAt", "desc")
+    );
+    const snapshot = await getDocs(q);
+    const sessions = [];
+    snapshot.forEach((d) => sessions.push({ id: d.id, ...d.data() }));
+    if (sessions.length === 0) return;
+
+    document.getElementById("history-section").style.display = "block";
+    document.getElementById("historyGrid").innerHTML = sessions.map((s, idx) => {
+      const date = s.createdAt?.toDate
+        ? s.createdAt.toDate().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+        : "Unknown date";
+      // Store session data in a global map to avoid inline JSON quoting issues
+      window._sessionCache = window._sessionCache || {};
+      window._sessionCache[idx] = s;
+      return `
+        <div class="history-card" onclick="restoreSession(window._sessionCache[${idx}])">
+          <div class="history-card-icon">📄</div>
+          <div class="history-card-info">
+            <div class="history-card-name">${escapeHtml(s.fileName || "Untitled")}</div>
+            <div class="history-card-date">${date}</div>
+            <div class="history-card-badges">
+              ${s.summary  ? '<span class="badge badge-green">Summary</span>' : ""}
+              ${s.quiz     ? '<span class="badge badge-blue">Quiz</span>'    : ""}
+              ${s.audioB64 ? '<span class="badge badge-amber">Audio</span>'  : ""}
+              ${s.videoUrl ? '<span class="badge badge-teal">Video</span>'   : ""}
+            </div>
+          </div>
+          <div class="history-card-arrow">→</div>
+        </div>`;
+    }).join("");
+  } catch (err) {
+    // If index isn't created yet, Firestore throws with a link to create it
+    if (err.message?.includes("index")) {
+      console.warn("Firestore index needed. Check the console link to create it:", err);
+    } else {
+      console.warn("Could not load history:", err);
+    }
+  }
+}
+
+window.restoreSession = function (session) {
+  showResultsSection();
+
+  if (session.summary) {
+    document.getElementById("result-summary").style.display = "block";
+    document.getElementById("summaryContent").innerHTML =
+      `<p>${escapeHtml(session.summary)}</p>`;
+  }
+
+  if (session.quiz?.length) {
+    document.getElementById("result-quiz").style.display = "block";
+    document.getElementById("quizContent").innerHTML =
+      session.quiz.map((q, i) => `
+        <div class="quiz-item">
+          <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
+          <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
+        </div>`).join("");
+  }
+
+  if (session.audioB64) {
+    const card = document.getElementById("result-audio");
+    card.style.display = "block";
+    // Play directly from base64 — no server needed
+    mountPlayer("audio", session.audioB64, card);
+  }
+
+  if (session.videoUrl) {
+    const card = document.getElementById("result-video");
+    card.style.display = "block";
+    const body = card.querySelector(".result-body");
+    // Video URL may have expired — show player but with a re-generate hint
+    body.innerHTML = `
+      <video controls class="video-player" id="videoPlayer" preload="metadata">
+        Your browser does not support HTML5 video.
+      </video>
+      <a class="btn-download" id="videoDownload" href="${session.videoUrl}" download style="display:inline-block">
+        ⬇ Download MP4
+      </a>
+      <p class="video-expire-note">
+        ⚠ Video links may expire. If it doesn't play, re-upload the file and regenerate.
+      </p>`;
+    const player = body.querySelector("#videoPlayer");
+    player.src = session.videoUrl;
+    player.load();
+  }
+
+  showToast(`Restored: ${session.fileName}`, "success");
+  document.getElementById("results-section").scrollIntoView({ behavior: "smooth" });
+};
+
 // ─── HELPERS ─────────────────────────────────────────────────────
+function showResultsSection() {
+  document.getElementById("results-section").style.display = "block";
+}
+
 function setButtonLoading(btn, loading) {
   if (!btn) return;
   btn.disabled = loading;
@@ -307,21 +421,17 @@ function showToast(msg, type = "") {
   setTimeout(() => t.remove(), 3500);
 }
 
-function copyText(id) {
+window.copyText = function (id) {
   const el = document.getElementById(id);
   if (!el) return;
-  navigator.clipboard.writeText(el.innerText)
-    .then(() => showToast("Copied!", "success"));
-}
+  navigator.clipboard.writeText(el.innerText).then(() => showToast("Copied!", "success"));
+};
 
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function escapeHtml(str) {
   if (!str) return "";
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }

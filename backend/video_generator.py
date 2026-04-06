@@ -1,10 +1,12 @@
 """
 video_generator.py — Explainer Video Generation
 ================================================
-Creates a slide-style MP4 explainer video using:
-  - Pillow (PIL) to render text slides as images
-  - MoviePy to assemble images + audio into a video
-  - gTTS/Coqui to generate narration audio (optional)
+Slide duration and total video length are derived from the actual
+content — longer text = more slides = longer video.
+
+Reading speed assumption: ~150 words per minute (comfortable narration pace).
+Each slide's duration = time needed to read its body text aloud + 2s padding.
+Minimum slide duration: 5s. Maximum: 20s.
 
 Course: Advanced Topics in Machine Learning (HTML)
 """
@@ -18,31 +20,45 @@ import nltk
 
 log = logging.getLogger(__name__)
 
-# Output video settings
-VIDEO_W, VIDEO_H = 1280, 720
-SLIDE_DURATION   = 6
-FPS              = 24
-FONT_SIZE_TITLE  = 36
-FONT_SIZE_BODY   = 28
+VIDEO_W, VIDEO_H   = 1280, 720
+FPS                = 24
+WORDS_PER_MINUTE   = 150          # narration reading speed
+MIN_SLIDE_DURATION = 5            # seconds
+MAX_SLIDE_DURATION = 20           # seconds
+PADDING_SECONDS    = 2            # extra buffer per slide
 
-# Colors
+FONT_SIZE_TITLE = 36
+FONT_SIZE_BODY  = 28
+
 BG_COLOR     = (11, 17, 32)
 ACCENT_COLOR = (245, 158, 11)
 BODY_COLOR   = (176, 190, 197)
 TITLE_COLOR  = (240, 244, 248)
 
 
+# ─── DURATION HELPER ────────────────────────────────────────────
+
+def _slide_duration(body_text: str) -> float:
+    """
+    Calculate how long a slide should display based on word count.
+    duration = (words / 150wpm * 60) + 2s padding, clamped to [5, 20].
+    """
+    words = len(body_text.split())
+    reading_time = (words / WORDS_PER_MINUTE) * 60
+    return max(MIN_SLIDE_DURATION, min(MAX_SLIDE_DURATION, reading_time + PADDING_SECONDS))
+
+
 # ─── PIL SLIDE RENDERING ────────────────────────────────────────
 
 def _get_font(size: int, bold: bool = False):
     from PIL import ImageFont
-    font_candidates = [
+    candidates = [
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
     ]
-    for path in font_candidates:
+    for path in candidates:
         if Path(path).exists():
             try:
                 return ImageFont.truetype(path, size)
@@ -64,31 +80,25 @@ def render_slide(title: str, body: str, slide_num: int, total: int):
     for y in range(0, VIDEO_H, 48):
         draw.line([(0, y), (VIDEO_W, y)], fill=grid_color, width=1)
 
-    # Amber left accent bar
     draw.rectangle([48, 80, 54, VIDEO_H - 80], fill=ACCENT_COLOR)
 
-    # Slide counter
     counter_font = _get_font(16)
     draw.text((VIDEO_W - 80, 30), f"{slide_num} / {total}",
               font=counter_font, fill=(75, 85, 99))
 
-    # Title
     title_font = _get_font(FONT_SIZE_TITLE, bold=True)
     title_y    = 100
     draw.text((80, title_y), title, font=title_font, fill=TITLE_COLOR)
 
-    # Amber underline
     title_bbox = draw.textbbox((80, title_y), title, font=title_font)
     draw.line([(80, title_bbox[3] + 8), (title_bbox[2], title_bbox[3] + 8)],
               fill=ACCENT_COLOR, width=2)
 
-    # Body text
     body_font = _get_font(FONT_SIZE_BODY)
     wrapped   = textwrap.fill(body, width=65)
     draw.multiline_text((80, title_bbox[3] + 32), wrapped,
                         font=body_font, fill=BODY_COLOR, spacing=10)
 
-    # Branding
     brand_font = _get_font(18)
     draw.text((80, VIDEO_H - 40), "ScholarAI · Advanced Topics in ML",
               font=brand_font, fill=(55, 65, 81))
@@ -99,6 +109,10 @@ def render_slide(title: str, body: str, slide_num: int, total: int):
 # ─── SLIDE SEGMENTATION ─────────────────────────────────────────
 
 def _segment_summary(summary: str, sentences_per_slide: int = 3) -> List[Tuple[str, str]]:
+    """
+    Split summary into slides. More content → more slides → longer video.
+    sentences_per_slide controls granularity (3 = ~60-90 words per slide).
+    """
     try:
         sentences = nltk.sent_tokenize(summary)
     except Exception:
@@ -121,7 +135,6 @@ def _segment_summary(summary: str, sentences_per_slide: int = 3) -> List[Tuple[s
 def generate_video(summary: str, output_path: str) -> str:
     try:
         from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
-        from PIL import Image
         import numpy as np
 
         segments = _segment_summary(summary, sentences_per_slide=3)
@@ -129,41 +142,49 @@ def generate_video(summary: str, output_path: str) -> str:
 
         clips = []
         for i, (title, body) in enumerate(segments):
+            duration  = _slide_duration(body)
             pil_img   = render_slide(title, body, i + 1, len(segments))
             img_array = np.array(pil_img)
-            clip = ImageClip(img_array).set_duration(SLIDE_DURATION).set_fps(FPS)
-            clip = clip.fadein(0.5).fadeout(0.5)
+            clip = (ImageClip(img_array)
+                    .set_duration(duration)
+                    .set_fps(FPS)
+                    .fadein(0.4)
+                    .fadeout(0.4))
             clips.append(clip)
+            log.info(f"  Slide {i+1}: '{title}' — {len(body.split())} words → {duration:.1f}s")
 
         final = concatenate_videoclips(clips, method="compose")
+        total_duration = sum(c.duration for c in clips)
+        log.info(f"Total video duration: {total_duration:.1f}s ({len(segments)} slides)")
 
-        # Try to add TTS narration audio
+        # ── TTS narration ──────────────────────────────────────
         audio_path = output_path.replace(".mp4", "_narration.mp3")
         audio_clip = None
         try:
             from .tts_generator import generate_audio
-            generate_audio(summary, audio_path)
+            success = generate_audio(summary, audio_path)
 
-            if Path(audio_path).exists() and Path(audio_path).stat().st_size > 500:
-                audio_clip = AudioFileClip(audio_path)
-                video_dur  = final.duration
+            wav_alt = audio_path.replace(".mp3", ".wav")
+            actual_audio = audio_path if Path(audio_path).exists() else wav_alt
+
+            if success and Path(actual_audio).exists() and Path(actual_audio).stat().st_size > 500:
+                audio_clip = AudioFileClip(actual_audio)
                 audio_dur  = audio_clip.duration
+                video_dur  = final.duration
 
                 if audio_dur < video_dur:
-                    audio_clip = audio_clip.audio_loop(duration=video_dur)
+                    from moviepy.audio.fx.all import audio_loop
+                    audio_clip = audio_loop(audio_clip, duration=video_dur)
                 else:
                     audio_clip = audio_clip.subclip(0, video_dur)
 
                 final = final.set_audio(audio_clip)
-                log.info("Audio added to video.")
+                log.info(f"Audio added: {audio_dur:.1f}s audio over {video_dur:.1f}s video")
 
         except Exception as e:
-            audio_exists = Path(audio_path).exists()
-            audio_size = Path(audio_path).stat().st_size if audio_exists else 0
             log.warning(f"Could not add audio to video: {type(e).__name__}: {e}")
-            log.warning(f"Audio path details: {audio_path} exists={audio_exists} size={audio_size}")
 
-        # Export MP4
+        # ── Export ─────────────────────────────────────────────
         final.write_videofile(
             output_path,
             fps=FPS,
@@ -175,24 +196,21 @@ def generate_video(summary: str, output_path: str) -> str:
             verbose=False
         )
 
-        # Cleanup — close audio clip before deleting on Windows
         if audio_clip is not None:
-            try:
-                audio_clip.close()
-            except Exception:
-                pass
+            try: audio_clip.close()
+            except Exception: pass
 
-        try:
-            if Path(audio_path).exists():
-                Path(audio_path).unlink()
-        except Exception as e:
-            log.warning(f"Could not delete temp audio (Windows lock): {e}")
+        # Cleanup narration temp file
+        for p in [audio_path, audio_path.replace(".mp3", ".wav")]:
+            try:
+                if Path(p).exists(): Path(p).unlink()
+            except Exception: pass
 
         log.info(f"Video saved → {output_path}")
         return output_path
 
     except ImportError as e:
-        log.warning(f"MoviePy/PIL not available: {e}. Writing placeholder.")
+        log.warning(f"MoviePy/PIL not available: {e}. Writing slideshow fallback.")
         return _write_slideshow_fallback(summary, output_path)
     except Exception as e:
         log.error(f"Video generation failed: {e}", exc_info=True)
@@ -203,8 +221,8 @@ def generate_video(summary: str, output_path: str) -> str:
 
 def _write_slideshow_fallback(summary: str, output_path: str) -> str:
     try:
-        from PIL import Image
         import io, zipfile
+        from PIL import Image
 
         segments = _segment_summary(summary)
         zip_path = output_path.replace(".mp4", "_slides.zip")
@@ -217,7 +235,7 @@ def _write_slideshow_fallback(summary: str, output_path: str) -> str:
                 zf.writestr(f"slide_{i+1:02d}.png", buf.getvalue())
 
         log.info(f"Slideshow ZIP saved → {zip_path}")
-        Path(output_path).write_text(f"[Video slides exported as {zip_path}]")
+        Path(output_path).write_text(f"[Slides exported as {zip_path}]")
         return output_path
 
     except Exception:
