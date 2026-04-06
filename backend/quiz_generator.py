@@ -1,23 +1,23 @@
 """
-quiz_generator.py — NLP-Based Quiz Generation
-===============================================
+quiz_generator.py — T5-Based MCQ Quiz Generation
+==================================================
+Generates multiple-choice questions with:
+  - 4 answer options (A/B/C/D)
+  - 1 correct answer
+  - Reasoning/explanation for the correct answer
+
 Pipeline:
-  1. Split text into meaningful chunks (paragraphs/sentences)
-  2. Extract key entities and noun phrases using spaCy
-  3. Generate fill-in-blank and factual questions using heuristics
-     + optionally: transformers QG (question-generation) model
-  4. Use the SBERT + Autoencoder embeddings to select
-     the most semantically diverse question candidates
+  1. Split text into meaningful chunks
+  2. Use T5 (valhalla/t5-base-qg-hl) to generate questions from each chunk
+  3. Use the source chunk to derive distractors via keyword extraction
+  4. Use BGE embeddings to select the most diverse final set of questions
 
-Methods:
-  - Rule-based question generation from NLP parse trees
-  - Keyword extraction via TF-IDF + spaCy NER
-  - Transformer-based QA (pipeline) for answer validation
-
-Course: Advanced Topics in Machine Learning (HTML)
+Course: Advanced Topics in Machine Learning
 """
 
-import re, logging, random
+import re
+import logging
+import random
 from typing import List, Dict
 
 import nltk
@@ -25,8 +25,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Download NLTK resources
-for resource in ["punkt", "averaged_perceptron_tagger", "stopwords"]:
+for resource in ["punkt", "punkt_tab", "stopwords"]:
     try:
         nltk.data.find(f"tokenizers/{resource}")
     except LookupError:
@@ -35,175 +34,260 @@ for resource in ["punkt", "averaged_perceptron_tagger", "stopwords"]:
         except Exception:
             pass
 
-
-# ─── QUESTION TEMPLATES ─────────────────────────────────────────
-DEFINITION_PATTERNS = [
-    r"(.+?)\s+is\s+((?:a|an|the)\s+.+?)[\.\,]",
-    r"(.+?)\s+are\s+((?:a|an|the|used|applied|.+?)[\w\s]+?)[\.\,]",
-    r"(.+?)\s+refers to\s+(.+?)[\.\,]",
-    r"(.+?)\s+can be defined as\s+(.+?)[\.\,]",
-]
+# ─── LAZY MODEL LOADING ─────────────────────────────────────────
+_t5_model = None
+_t5_tok   = None
 
 
-def _extract_definitions(text: str) -> List[Dict]:
+def _load_t5():
+    global _t5_model, _t5_tok
+    if _t5_model is None:
+        from transformers import T5ForConditionalGeneration, T5Tokenizer
+        log.info("Loading T5 question generation model…")
+        model_name = "valhalla/t5-base-qg-hl"
+        _t5_tok   = T5Tokenizer.from_pretrained(model_name)
+        _t5_model = T5ForConditionalGeneration.from_pretrained(model_name)
+        log.info("T5 QG model loaded.")
+    return _t5_model, _t5_tok
+
+
+# ─── TEXT CHUNKING ───────────────────────────────────────────────
+
+def _chunk_text(text: str, chunk_size: int = 400) -> List[str]:
+    """Split text into overlapping chunks suitable for T5 input."""
+    sentences = nltk.sent_tokenize(text)
+    chunks, current = [], ""
+    for sent in sentences:
+        if len(current) + len(sent) < chunk_size:
+            current += " " + sent
+        else:
+            if current.strip():
+                chunks.append(current.strip())
+            current = sent
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks[:20]  # cap at 20 chunks for speed
+
+
+# ─── T5 QUESTION GENERATION ─────────────────────────────────────
+
+def _highlight_answer(context: str, answer: str) -> str:
+    """Wrap the answer span with <hl> tags for T5 input format."""
+    highlighted = context.replace(answer, f"<hl> {answer} <hl>", 1)
+    return f"generate question: {highlighted}"
+
+
+def _extract_keywords(text: str, n: int = 10) -> List[str]:
+    """Extract top TF-IDF keywords from a chunk for distractor generation."""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        sentences = nltk.sent_tokenize(text)
+        if len(sentences) < 2:
+            sentences = [text]
+        tfidf = TfidfVectorizer(max_features=n, stop_words="english", ngram_range=(1, 2))
+        tfidf.fit(sentences)
+        return list(tfidf.vocabulary_.keys())
+    except Exception:
+        words = [w for w in text.split() if len(w) > 4]
+        return list(set(words))[:n]
+
+
+def _generate_distractors(correct: str, context: str, n: int = 3) -> List[str]:
     """
-    Extract definition-style question-answer pairs using regex patterns.
-    Example: "X is a Y" → Q: "What is X?" A: "Y"
+    Generate plausible wrong answers from the same context chunk.
+    Uses keyword extraction to find semantically related but incorrect options.
     """
+    keywords = _extract_keywords(context, n=15)
+    # Filter out keywords too similar to the correct answer
+    distractors = [
+        kw.title() for kw in keywords
+        if kw.lower() not in correct.lower()
+        and correct.lower() not in kw.lower()
+        and len(kw) > 3
+    ]
+    random.shuffle(distractors)
+    distractors = distractors[:n]
+
+    # Pad with generic placeholders if not enough distractors
+    placeholders = [
+        "None of the above",
+        "All of the above",
+        "Cannot be determined",
+        "Not mentioned in the text"
+    ]
+    while len(distractors) < n:
+        p = placeholders.pop(0) if placeholders else f"Option {len(distractors)+1}"
+        distractors.append(p)
+
+    return distractors[:n]
+
+
+def _generate_reasoning(question: str, correct: str, context: str) -> str:
+    """
+    Generate a brief explanation for why the correct answer is right,
+    grounded in the source context.
+    """
+    # Find the sentence in context that best supports the answer
+    sentences = nltk.sent_tokenize(context)
+    for sent in sentences:
+        if correct.lower() in sent.lower():
+            return f'"{sent.strip()}" — this directly supports the answer.'
+    # Fallback: generic reasoning
+    return f'According to the document, "{correct}" is the correct answer based on the provided context.'
+
+
+def _t5_generate_questions(chunks: List[str]) -> List[Dict]:
+    """Use T5 to generate questions from text chunks."""
+    try:
+        model, tok = _load_t5()
+        qa_pairs = []
+
+        for chunk in chunks:
+            if len(chunk.split()) < 15:
+                continue
+
+            # Extract a key phrase as the answer span
+            keywords = _extract_keywords(chunk, n=5)
+            if not keywords:
+                continue
+
+            answer_span = keywords[0]
+
+            # Check the answer span actually appears in the chunk
+            if answer_span.lower() not in chunk.lower():
+                # Try to find it case-insensitively
+                for kw in keywords:
+                    if kw.lower() in chunk.lower():
+                        answer_span = kw
+                        break
+                else:
+                    continue
+
+            input_text = _highlight_answer(chunk, answer_span)
+            inputs = tok(
+                input_text,
+                return_tensors="pt",
+                max_length=512,
+                truncation=True
+            )
+
+            outputs = model.generate(
+                inputs["input_ids"],
+                max_length=64,
+                num_beams=4,
+                early_stopping=True,
+                no_repeat_ngram_size=2
+            )
+            question = tok.decode(outputs[0], skip_special_tokens=True).strip()
+
+            if not question or len(question.split()) < 4:
+                continue
+            if not question.endswith("?"):
+                question += "?"
+
+            correct_answer = answer_span.title()
+            distractors    = _generate_distractors(correct_answer, chunk, n=3)
+            options        = [correct_answer] + distractors
+            random.shuffle(options)
+            correct_idx    = options.index(correct_answer)
+            reasoning      = _generate_reasoning(question, correct_answer, chunk)
+
+            qa_pairs.append({
+                "question":     question,
+                "options":      options,
+                "correct":      correct_idx,   # index into options list
+                "answer":       correct_answer,
+                "reasoning":    reasoning
+            })
+
+        return qa_pairs
+
+    except Exception as e:
+        log.warning(f"T5 question generation failed: {e}")
+        return []
+
+
+# ─── FALLBACK: RULE-BASED MCQ ────────────────────────────────────
+
+def _fallback_mcq(text: str, n: int = 10) -> List[Dict]:
+    """
+    Rule-based MCQ fallback when T5 is unavailable.
+    Uses definition patterns to extract Q&A pairs and wraps them as MCQ.
+    """
+    patterns = [
+        r"(.+?)\s+is\s+((?:a|an|the)\s+.+?)[\.\,]",
+        r"(.+?)\s+refers to\s+(.+?)[\.\,]",
+        r"(.+?)\s+are\s+([\w\s]+?)[\.\,]",
+    ]
     qa_pairs = []
-    for pattern in DEFINITION_PATTERNS:
+    for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             subject = match.group(1).strip()
             defn    = match.group(2).strip()
-            if 3 < len(subject.split()) < 8 and len(defn.split()) > 3:
+            if 2 < len(subject.split()) < 8 and len(defn.split()) > 2:
+                correct = defn.capitalize()
+                distractors = _generate_distractors(correct, text[:1000], n=3)
+                options = [correct] + distractors
+                random.shuffle(options)
+                correct_idx = options.index(correct)
                 qa_pairs.append({
-                    "question": f"What is {subject}?",
-                    "answer":   defn.capitalize() + "."
-                })
-    return qa_pairs
-
-
-def _extract_ner_questions(text: str) -> List[Dict]:
-    """
-    Use spaCy Named Entity Recognition to generate factual questions.
-    """
-    try:
-        import spacy
-        try:
-            nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            log.warning("spaCy model not found. Run: python -m spacy download en_core_web_sm")
-            return []
-
-        doc = nlp(text[:5000])  # Limit for speed
-        qa_pairs = []
-        sentences = list(doc.sents)
-
-        for sent in sentences:
-            ents = [e for e in sent.ents if e.label_ in
-                    {"ORG", "PERSON", "PRODUCT", "WORK_OF_ART", "GPE", "NORP", "FAC"}]
-            if ents:
-                ent = ents[0]
-                q_map = {
-                    "ORG":         f"Which organization is mentioned in context of: '{sent.text[:60].strip()}…'?",
-                    "PERSON":      f"Who is referenced in: '{sent.text[:60].strip()}…'?",
-                    "GPE":         f"Which place is associated with: '{sent.text[:60].strip()}…'?",
-                    "PRODUCT":     f"What product is discussed in: '{sent.text[:60].strip()}…'?",
-                    "WORK_OF_ART": f"What work is mentioned in: '{sent.text[:60].strip()}…'?",
-                    "NORP":        f"Which group is referred to in: '{sent.text[:60].strip()}…'?",
-                }
-                question = q_map.get(ent.label_,
-                    f"What does the text mention about '{ent.text}'?")
-                qa_pairs.append({
-                    "question": question,
-                    "answer":   f"{ent.text} — {sent.text.strip()}"
+                    "question":  f"What is {subject}?",
+                    "options":   options,
+                    "correct":   correct_idx,
+                    "answer":    correct,
+                    "reasoning": f"{subject.capitalize()} is defined as: {correct}."
                 })
 
-        return qa_pairs
-
-    except ImportError:
-        log.warning("spaCy not installed.")
-        return []
-
-
-def _keyword_questions(text: str, n: int = 15) -> List[Dict]:
-    """
-    TF-IDF keyword extraction → fill-in-blank questions.
-    """
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        sentences = nltk.sent_tokenize(text)
-        sentences = [s for s in sentences if len(s.split()) > 8]
-        if not sentences:
-            return []
-
-        tfidf = TfidfVectorizer(max_features=30, stop_words="english", ngram_range=(1, 2))
-        tfidf.fit(sentences)
-        keywords = list(tfidf.vocabulary_.keys())
-
-        qa_pairs = []
-        for sent in sentences[:40]:
-            for kw in keywords:
-                # Multi-word keyword match
-                kw_re = re.escape(kw)
-                if re.search(rf"\b{kw_re}\b", sent, re.IGNORECASE):
-                    blank = re.sub(rf"\b{kw_re}\b", "______", sent, flags=re.IGNORECASE, count=1)
-                    qa_pairs.append({
-                        "question": f"Fill in the blank: \"{blank}\"",
-                        "answer":   f'"{kw.title()}"'
-                    })
-                    break
-
-        return qa_pairs[:n]
-
-    except ImportError:
-        return []
-
-
-def _fallback_sentence_questions(text: str, n: int = 10) -> List[Dict]:
-    """
-    Last resort: turn statements into questions by reversing structure.
-    """
-    sentences = nltk.sent_tokenize(text)
-    sentences = [s.strip() for s in sentences
-                 if len(s.split()) > 10 and s[-1] in ".!"]
-
-    qa_pairs = []
-    templates = [
-        lambda s: (f"What does the following statement describe? '{s[:80].strip()}…'",
-                   s),
-        lambda s: (f"True or False: '{s[:80].strip()}'",
-                   "True — as stated in the document."),
-        lambda s: (f"Summarize the key point: '{s[:80].strip()}…'",
-                   s),
-    ]
-
+    # Pad with generic questions if needed
+    sentences = [s for s in nltk.sent_tokenize(text) if len(s.split()) > 10]
     for i, sent in enumerate(sentences[:n]):
-        fn = templates[i % len(templates)]
-        q, a = fn(sent)
-        qa_pairs.append({"question": q, "answer": a})
+        if len(qa_pairs) >= n:
+            break
+        keywords = _extract_keywords(sent, n=4)
+        if not keywords:
+            continue
+        correct = keywords[0].title()
+        distractors = _generate_distractors(correct, sent, n=3)
+        options = [correct] + distractors
+        random.shuffle(options)
+        correct_idx = options.index(correct)
+        qa_pairs.append({
+            "question":  f'Fill in the blank: "{sent.replace(keywords[0], "______", 1)}"',
+            "options":   options,
+            "correct":   correct_idx,
+            "answer":    correct,
+            "reasoning": f'The correct term is "{correct}" based on the document context.'
+        })
 
-    return qa_pairs
+    return qa_pairs[:n]
 
 
-# ─── DIVERSITY FILTERING ────────────────────────────────────────
+# ─── DIVERSITY FILTER ────────────────────────────────────────────
+
 def _diversify(qa_pairs: List[Dict], n: int = 10) -> List[Dict]:
-    """
-    Use SBERT + cosine similarity to select n maximally diverse questions.
-    Falls back to random selection if SBERT is unavailable.
-    """
+    """Select n maximally diverse questions using BGE embeddings."""
     if len(qa_pairs) <= n:
         return qa_pairs
-
     try:
         from sentence_transformers import SentenceTransformer
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        model  = SentenceTransformer("all-MiniLM-L6-v2")
+        model  = SentenceTransformer("BAAI/bge-small-en-v1.5")
         qs     = [p["question"] for p in qa_pairs]
-        embeds = model.encode(qs, convert_to_numpy=True)
+        embeds = model.encode(qs, convert_to_numpy=True, normalize_embeddings=True)
 
+        from sklearn.metrics.pairwise import cosine_similarity
         selected = [0]
         while len(selected) < n and len(selected) < len(qa_pairs):
             remaining = [i for i in range(len(qa_pairs)) if i not in selected]
             if not remaining:
                 break
-            # Pick the question least similar to already-selected ones
             sel_embs = embeds[selected]
-            scores   = []
-            for i in remaining:
-                sims = cosine_similarity(embeds[i:i+1], sel_embs).max()
-                scores.append((sims, i))
+            scores   = [(cosine_similarity(embeds[i:i+1], sel_embs).max(), i)
+                        for i in remaining]
             scores.sort()
             selected.append(scores[0][1])
-
         return [qa_pairs[i] for i in selected]
-
-    except ImportError:
-        # Simple deduplication + random sample
-        seen = set()
-        unique = []
+    except Exception:
+        seen, unique = set(), []
         for p in qa_pairs:
             key = p["question"][:40].lower()
             if key not in seen:
@@ -214,48 +298,50 @@ def _diversify(qa_pairs: List[Dict], n: int = 10) -> List[Dict]:
 
 
 # ─── MASTER FUNCTION ─────────────────────────────────────────────
+
 def generate_quiz(text: str, n: int = 10) -> List[Dict]:
     """
-    Generate n quiz questions from document text.
-    Combines multiple NLP strategies, then selects diverse questions.
+    Generate n MCQ questions from document text.
 
-    Returns list of {question: str, answer: str} dicts.
+    Returns list of:
+    {
+      question:  str,
+      options:   [str, str, str, str],   # 4 choices
+      correct:   int,                    # index of correct option (0-3)
+      answer:    str,                    # correct answer text
+      reasoning: str                     # explanation shown on wrong answer
+    }
     """
     if not text or len(text.strip()) < 100:
-        return [{"question": "Document too short to generate a meaningful quiz.",
-                 "answer":   "Please upload a document with more content."}]
+        return [{
+            "question":  "Document too short to generate a meaningful quiz.",
+            "options":   ["Upload a longer document", "N/A", "N/A", "N/A"],
+            "correct":   0,
+            "answer":    "Upload a longer document",
+            "reasoning": "Please upload a document with more content."
+        }]
 
-    all_qa: List[Dict] = []
+    chunks   = _chunk_text(text, chunk_size=400)
+    all_qa   = _t5_generate_questions(chunks)
+    log.info(f"T5 generated {len(all_qa)} questions")
 
-    # Strategy 1: Pattern-based definitions
-    defs = _extract_definitions(text)
-    log.info(f"Definition questions: {len(defs)}")
-    all_qa.extend(defs)
-
-    # Strategy 2: NER-based factual questions
-    ner_qs = _extract_ner_questions(text)
-    log.info(f"NER questions: {len(ner_qs)}")
-    all_qa.extend(ner_qs)
-
-    # Strategy 3: TF-IDF keyword fill-in-blank
-    kw_qs = _keyword_questions(text, n=20)
-    log.info(f"Keyword questions: {len(kw_qs)}")
-    all_qa.extend(kw_qs)
-
-    # Strategy 4: Fallback sentence questions
+    # Fallback if T5 didn't produce enough
     if len(all_qa) < n:
-        fb_qs = _fallback_sentence_questions(text, n=n - len(all_qa) + 5)
-        all_qa.extend(fb_qs)
+        fallback = _fallback_mcq(text, n=n - len(all_qa) + 3)
+        all_qa.extend(fallback)
+        log.info(f"Fallback added {len(fallback)} questions, total: {len(all_qa)}")
 
-    # Select n diverse questions
     final = _diversify(all_qa, n=n)
 
     # Ensure exactly n questions
     while len(final) < n:
         final.append({
-            "question": f"Q{len(final)+1}: What is a key concept discussed in this document?",
-            "answer":   "Refer to the document summary for main concepts."
+            "question":  f"Q{len(final)+1}: What is a key concept in this document?",
+            "options":   ["Refer to the summary", "Not covered", "See document", "N/A"],
+            "correct":   0,
+            "answer":    "Refer to the summary",
+            "reasoning": "Review the AI-generated summary for the main concepts."
         })
 
-    log.info(f"Quiz generated: {len(final)} questions")
+    log.info(f"Quiz ready: {len(final)} MCQ questions")
     return final[:n]
