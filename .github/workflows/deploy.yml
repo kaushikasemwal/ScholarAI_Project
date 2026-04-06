@@ -58,8 +58,6 @@ jobs:
   deploy-backend:
     name: Deploy Backend → Hugging Face Spaces
     runs-on: ubuntu-latest
-    # Skip this job if HF secrets are not configured yet
-    if: ${{ secrets.HF_TOKEN != '' && secrets.HF_SPACE_ID != '' }}
 
     steps:
       - name: Checkout
