@@ -4,54 +4,48 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # JOB 1: Deploy frontend to GitHub Pages
-  # ─────────────────────────────────────────────────────────────
   deploy-frontend:
-    name: Deploy Frontend → GitHub Pages
+    name: Deploy Frontend to GitHub Pages
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Write firebase-config.js using env var to avoid heredoc interpolation issues
       - name: Inject Firebase config
         env:
           FIREBASE_CONFIG_JSON: ${{ secrets.FIREBASE_CONFIG_JSON }}
         run: |
           if [ -z "$FIREBASE_CONFIG_JSON" ]; then
-            echo "WARNING: FIREBASE_CONFIG_JSON secret not set, using placeholder"
             FIREBASE_CONFIG_JSON='{"apiKey":"REPLACE_ME","authDomain":"REPLACE_ME","projectId":"REPLACE_ME","storageBucket":"REPLACE_ME","messagingSenderId":"REPLACE_ME","appId":"REPLACE_ME"}'
+            echo "WARNING: FIREBASE_CONFIG_JSON not set, using placeholder"
           fi
-          cat > frontend/firebase-config.js << 'EOF'
-          import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-          import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-          import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-          EOF
-          echo "const firebaseConfig = ${FIREBASE_CONFIG_JSON};" >> frontend/firebase-config.js
-          cat >> frontend/firebase-config.js << 'EOF'
-          const app      = initializeApp(firebaseConfig);
-          const auth     = getAuth(app);
-          const db       = getFirestore(app);
-          const provider = new GoogleAuthProvider();
-          export { auth, db, provider };
-          EOF
-          echo "firebase-config.js written successfully"
+          {
+            echo 'import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";'
+            echo 'import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";'
+            echo 'import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";'
+            echo "const firebaseConfig = ${FIREBASE_CONFIG_JSON};"
+            echo 'const app = initializeApp(firebaseConfig);'
+            echo 'const auth = getAuth(app);'
+            echo 'const db = getFirestore(app);'
+            echo 'const provider = new GoogleAuthProvider();'
+            echo 'export { auth, db, provider };'
+          } > frontend/firebase-config.js
+          echo "firebase-config.js written OK"
 
-      # Swap localhost API_BASE for the live HF Spaces URL
-      - name: Set production API_BASE
+      - name: Set production API base URL
         env:
           HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          if [ -z "$HF_SPACE_URL" ]; then
-            echo "WARNING: HF_SPACE_URL not set, keeping localhost for now"
-          else
+          if [ -n "$HF_SPACE_URL" ]; then
             sed -i "s|http://localhost:8000|${HF_SPACE_URL}|g" frontend/script.js
-            echo "API_BASE updated to ${HF_SPACE_URL}"
+            echo "API_BASE set to ${HF_SPACE_URL}"
+          else
+            echo "HF_SPACE_URL not set, keeping localhost"
           fi
 
       - name: Deploy to GitHub Pages
@@ -62,18 +56,13 @@ jobs:
           publish_branch: gh-pages
           force_orphan: true
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2: Push backend to Hugging Face Spaces
-  # ─────────────────────────────────────────────────────────────
   deploy-backend:
-    name: Deploy Backend → Hugging Face Spaces
+    name: Deploy Backend to Hugging Face Spaces
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Push to Hugging Face Spaces
         env:
@@ -81,17 +70,15 @@ jobs:
           HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
         run: |
           if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE_ID" ]; then
-            echo "HF_TOKEN or HF_SPACE_ID not set — skipping backend deploy."
+            echo "HF secrets not configured, skipping backend deploy."
             exit 0
           fi
 
           git config --global user.email "deploy@scholarai"
-          git config --global user.name  "ScholarAI Deploy"
+          git config --global user.name "ScholarAI Deploy"
 
-          # Clone the HF Space repo
           git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}" hf_space
 
-          # Sync backend files only — exclude frontend, git, cache, uploads/outputs
           rsync -av \
             --exclude='.git' \
             --exclude='frontend' \
@@ -108,9 +95,9 @@ jobs:
           git add -A
 
           if git diff --staged --quiet; then
-            echo "No changes to push to HF Spaces."
+            echo "No changes to push."
           else
             git commit -m "deploy: sync from GitHub $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "Successfully pushed to Hugging Face Spaces."
+            echo "Pushed to Hugging Face Spaces."
           fi
