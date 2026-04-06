@@ -18,26 +18,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Inject firebase-config.js from GitHub Secret at build time
-      # so the API key is never stored in the repo
+      # Write firebase-config.js using env var to avoid heredoc interpolation issues
       - name: Inject Firebase config
+        env:
+          FIREBASE_CONFIG_JSON: ${{ secrets.FIREBASE_CONFIG_JSON }}
         run: |
-          cat > frontend/firebase-config.js << 'ENDOFFILE'
+          cat > frontend/firebase-config.js << 'EOF'
           import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
           import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
           import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-          const firebaseConfig = ${{ secrets.FIREBASE_CONFIG_JSON }};
+          EOF
+          echo "const firebaseConfig = ${FIREBASE_CONFIG_JSON};" >> frontend/firebase-config.js
+          cat >> frontend/firebase-config.js << 'EOF'
           const app      = initializeApp(firebaseConfig);
           const auth     = getAuth(app);
           const db       = getFirestore(app);
           const provider = new GoogleAuthProvider();
           export { auth, db, provider };
-          ENDOFFILE
+          EOF
 
-      # Point API_BASE at the live HF Spaces backend URL
+      # Swap localhost API_BASE for the live HF Spaces URL
       - name: Set production API_BASE
+        env:
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          sed -i 's|const API_BASE = "http://localhost:8000"|const API_BASE = "${{ secrets.HF_SPACE_URL }}"|g' frontend/script.js
+          sed -i "s|http://localhost:8000|${HF_SPACE_URL}|g" frontend/script.js
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
@@ -45,6 +50,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./frontend
           publish_branch: gh-pages
+          force_orphan: true
 
   # ─────────────────────────────────────────────────────────────
   # JOB 2: Push backend to Hugging Face Spaces
@@ -52,39 +58,46 @@ jobs:
   deploy-backend:
     name: Deploy Backend → Hugging Face Spaces
     runs-on: ubuntu-latest
+    # Skip this job if HF secrets are not configured yet
+    if: ${{ secrets.HF_TOKEN != '' && secrets.HF_SPACE_ID != '' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
 
       - name: Push to Hugging Face Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
         run: |
           git config --global user.email "deploy@scholarai"
           git config --global user.name  "ScholarAI Deploy"
 
           # Clone the HF Space repo
-          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${{ secrets.HF_SPACE_ID }} hf_space
+          git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}" hf_space
 
-          # Copy backend + Dockerfile + requirements (exclude frontend & git files)
-          rsync -av --exclude='.git' --exclude='frontend' \
-                    --exclude='node_modules' --exclude='.github' \
-                    --exclude='outputs/*' --exclude='uploads/*' \
-                    --exclude='*.pyc' --exclude='__pycache__' \
-                    . hf_space/
+          # Sync backend files only — exclude frontend, git, cache, uploads/outputs
+          rsync -av \
+            --exclude='.git' \
+            --exclude='frontend' \
+            --exclude='node_modules' \
+            --exclude='.github' \
+            --exclude='outputs' \
+            --exclude='uploads' \
+            --exclude='*.pyc' \
+            --exclude='__pycache__' \
+            --exclude='hf_space' \
+            . hf_space/
 
           cd hf_space
           git add -A
 
-          # Only commit if there are actual changes
           if git diff --staged --quiet; then
-            echo "No changes to deploy to HF Spaces."
+            echo "No changes to push to HF Spaces."
           else
             git commit -m "deploy: sync from GitHub $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "Pushed to Hugging Face Spaces."
+            echo "Successfully pushed to Hugging Face Spaces."
           fi
