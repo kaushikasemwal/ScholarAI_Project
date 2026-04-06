@@ -104,18 +104,18 @@ def _try_gtts(text: str, output_path: str) -> bool:
         return False
 
 
-# ─── ENGINE 2: pyttsx3 ───────────────────────────────────────────
+# ─── ENGINE 2: pyttsx3 (Windows only fallback) ───────────────────
 def _try_pyttsx3(text: str, output_path: str) -> bool:
     """
-    pyttsx3 saves as WAV natively on Windows (SAPI5).
-    We save to a .wav path and serve that — browsers support WAV playback.
-    The output_path is renamed to .wav so the API serves the right file.
+    pyttsx3 only works on Windows (SAPI5). Skipped on Linux/HF Spaces.
     """
+    import platform
+    if platform.system() != "Windows":
+        log.info("pyttsx3 skipped — only available on Windows.")
+        return False
     try:
         import pyttsx3
         log.info("Generating audio with pyttsx3…")
-
-        # Save as WAV (pyttsx3 native on Windows), rename output to .wav
         wav_path = output_path.replace(".mp3", ".wav")
         engine = pyttsx3.init()
         engine.setProperty("rate", 160)
@@ -124,22 +124,13 @@ def _try_pyttsx3(text: str, output_path: str) -> bool:
         engine.runAndWait()
 
         if _is_real_audio(wav_path):
-            # Rename wav → mp3 path so the API endpoint finds it at output_path
-            # Browsers can play WAV even with .mp3 extension if Content-Type is set,
-            # but we rename to .wav and update the path reference instead.
             import shutil
-            shutil.move(wav_path, output_path.replace(".mp3", ".wav"))
-            # Signal success by writing a tiny redirect marker at output_path
-            # Actually: just copy wav to the mp3 path — browser will play WAV bytes
-            shutil.copy(output_path.replace(".mp3", ".wav"), output_path)
+            shutil.copy(wav_path, output_path)
+            Path(wav_path).unlink(missing_ok=True)
             log.info(f"pyttsx3 OK → {output_path} ({Path(output_path).stat().st_size} B)")
             return True
 
         log.warning("pyttsx3 produced no usable audio.")
-        return False
-
-    except ImportError:
-        log.warning("pyttsx3 not installed.")
         return False
     except Exception as e:
         log.warning(f"pyttsx3 failed: {e}")

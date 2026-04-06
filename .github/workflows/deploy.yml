@@ -1,0 +1,90 @@
+name: Deploy ScholarAI
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1: Deploy frontend to GitHub Pages
+  # ─────────────────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend → GitHub Pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Inject firebase-config.js from GitHub Secret at build time
+      # so the API key is never stored in the repo
+      - name: Inject Firebase config
+        run: |
+          cat > frontend/firebase-config.js << 'ENDOFFILE'
+          import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+          import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+          import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+          const firebaseConfig = ${{ secrets.FIREBASE_CONFIG_JSON }};
+          const app      = initializeApp(firebaseConfig);
+          const auth     = getAuth(app);
+          const db       = getFirestore(app);
+          const provider = new GoogleAuthProvider();
+          export { auth, db, provider };
+          ENDOFFILE
+
+      # Point API_BASE at the live HF Spaces backend URL
+      - name: Set production API_BASE
+        run: |
+          sed -i 's|const API_BASE = "http://localhost:8000"|const API_BASE = "${{ secrets.HF_SPACE_URL }}"|g' frontend/script.js
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./frontend
+          publish_branch: gh-pages
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2: Push backend to Hugging Face Spaces
+  # ─────────────────────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy Backend → Hugging Face Spaces
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "deploy@scholarai"
+          git config --global user.name  "ScholarAI Deploy"
+
+          # Clone the HF Space repo
+          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${{ secrets.HF_SPACE_ID }} hf_space
+
+          # Copy backend + Dockerfile + requirements (exclude frontend & git files)
+          rsync -av --exclude='.git' --exclude='frontend' \
+                    --exclude='node_modules' --exclude='.github' \
+                    --exclude='outputs/*' --exclude='uploads/*' \
+                    --exclude='*.pyc' --exclude='__pycache__' \
+                    . hf_space/
+
+          cd hf_space
+          git add -A
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to deploy to HF Spaces."
+          else
+            git commit -m "deploy: sync from GitHub $(date +'%Y-%m-%d %H:%M')"
+            git push
+            echo "Pushed to Hugging Face Spaces."
+          fi

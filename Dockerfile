@@ -1,20 +1,65 @@
-﻿FROM python:3.11-slim
+﻿# ─────────────────────────────────────────────────────────────────
+# ScholarAI — Hugging Face Spaces Dockerfile
+#
+# HF Spaces requirements:
+#   - Must run as non-root user (uid 1000)
+#   - App MUST listen on port 7860
+#   - HOME must be writable for model cache
+# ─────────────────────────────────────────────────────────────────
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg espeak espeak-ng libglib2.0-0 libgl1 && apt-get clean && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
+
+# System deps: ffmpeg for moviepy, espeak for pyttsx3, fonts for PIL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    espeak \
+    espeak-ng \
+    libglib2.0-0 \
+    libgl1 \
+    fonts-dejavu-core \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# HF Spaces runs as user 1000 — create it
+RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
 
+# Install Python deps as root first (faster layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
+# Download NLP models
 RUN python -m spacy download en_core_web_sm
+RUN python -c "\
+import nltk; \
+nltk.download('punkt'); \
+nltk.download('punkt_tab'); \
+nltk.download('stopwords'); \
+nltk.download('averaged_perceptron_tagger')"
 
-RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger')"
+# Pre-download BART + SBERT so first request isn't slow
+# This bakes the models into the image (~2GB) — comment out if image size matters
+RUN python -c "\
+from sentence_transformers import SentenceTransformer; \
+SentenceTransformer('all-MiniLM-L6-v2')" || true
 
+RUN python -c "\
+from transformers import BartTokenizer, BartForConditionalGeneration; \
+BartTokenizer.from_pretrained('facebook/bart-large-cnn'); \
+BartForConditionalGeneration.from_pretrained('facebook/bart-large-cnn')" || true
+
+# Copy app code
 COPY . .
 
-RUN mkdir -p uploads outputs models
+# Create writable dirs and set ownership
+RUN mkdir -p uploads outputs models \
+    && chown -R appuser:appuser /app
 
-EXPOSE 8000
+# Switch to non-root user
+USER appuser
 
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# HF Spaces requires port 7860
+EXPOSE 7860
+
+CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
