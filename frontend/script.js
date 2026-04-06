@@ -149,6 +149,8 @@ window.generateOutput = async function (type) {
     const data = await resp.json();
     await renderResult(type, data);
     showToast(`${capitalize(type)} generated.`, "success");
+    // Show a "View Notes" button after any generation
+    if (currentDocRef) showViewNotesBtn();
   } catch (err) {
     showToast(`${capitalize(type)} failed. Check the backend logs.`, "error");
     console.error(err);
@@ -169,6 +171,12 @@ window.generateAll = async function () {
     await delay(300);
   }
   btn.disabled = false; btn.textContent = "⚡ Generate All Outputs";
+  // Redirect to notes page after generating all
+  if (currentDocRef) {
+    showToast("All done! Opening your notes…", "success");
+    await delay(1000);
+    window.location.href = `notes.html?id=${currentDocRef.id}`;
+  }
 };
 
 // ─── RESULT RENDERING ────────────────────────────────────────────
@@ -323,11 +331,10 @@ async function loadHistory() {
       const date = s.createdAt?.toDate
         ? s.createdAt.toDate().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
         : "Unknown date";
-      // Store session data in a global map to avoid inline JSON quoting issues
       window._sessionCache = window._sessionCache || {};
       window._sessionCache[idx] = s;
       return `
-        <div class="history-card" onclick="restoreSession(window._sessionCache[${idx}])">
+        <a class="history-card" href="notes.html?id=${s.id}">
           <div class="history-card-icon">📄</div>
           <div class="history-card-info">
             <div class="history-card-name">${escapeHtml(s.fileName || "Untitled")}</div>
@@ -340,7 +347,7 @@ async function loadHistory() {
             </div>
           </div>
           <div class="history-card-arrow">→</div>
-        </div>`;
+        </a>`;
     }).join("");
   } catch (err) {
     // If index isn't created yet, Firestore throws with a link to create it
@@ -407,6 +414,18 @@ window.restoreSession = function (session) {
 // ─── HELPERS ─────────────────────────────────────────────────────
 function showResultsSection() {
   document.getElementById("results-section").style.display = "block";
+}
+
+function showViewNotesBtn() {
+  let btn = document.getElementById("viewNotesBtn");
+  if (btn) return; // already shown
+  btn = document.createElement("div");
+  btn.id = "viewNotesBtn";
+  btn.className = "view-notes-banner";
+  btn.innerHTML = `
+    <span>✅ Content saved to your account.</span>
+    <a href="notes.html?id=${currentDocRef.id}" class="btn-view-notes">View Full Notes →</a>`;
+  document.getElementById("results-section").prepend(btn);
 }
 
 function setButtonLoading(btn, loading) {
