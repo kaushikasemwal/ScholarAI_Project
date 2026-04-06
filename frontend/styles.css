@@ -985,3 +985,49 @@ body.auth-page {
   .notes-tabs { gap: 0; }
   .notes-tab { padding: 0.6rem 0.75rem; font-size: 0.8rem; }
 }
+
+/* ── My Notes button in header ──────────────────────────────────── */
+.btn-my-notes {
+  background: rgba(245,158,11,0.1); color: var(--amber);
+  border: 1px solid rgba(245,158,11,0.25); border-radius: 8px;
+  font-family: var(--font-body); font-size: 0.8rem; font-weight: 600;
+  padding: 0.35rem 0.85rem; text-decoration: none;
+  transition: background 0.2s; white-space: nowrap;
+}
+.btn-my-notes:hover { background: rgba(245,158,11,0.2); }
+
+/* ── Notes library search + filter ─────────────────────────────── */
+.notes-search-bar {
+  display: flex; flex-wrap: wrap; gap: 0.75rem;
+  align-items: center; margin-bottom: 1.75rem;
+}
+.notes-search-bar input {
+  flex: 1; min-width: 200px;
+  background: var(--navy-card); border: 1px solid var(--navy-border);
+  border-radius: 8px; color: var(--text-primary);
+  font-family: var(--font-body); font-size: 0.9rem;
+  padding: 0.6rem 1rem; outline: none;
+  transition: border-color 0.2s;
+}
+.notes-search-bar input:focus { border-color: var(--amber); }
+.notes-search-bar input::placeholder { color: var(--text-muted); }
+
+.notes-filter-pills { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.filter-pill {
+  background: var(--navy-card); color: var(--text-secondary);
+  border: 1px solid var(--navy-border); border-radius: 999px;
+  font-family: var(--font-body); font-size: 0.78rem; font-weight: 500;
+  padding: 0.3rem 0.85rem; cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+.filter-pill:hover { border-color: var(--amber); color: var(--amber); }
+.filter-pill.active {
+  background: rgba(245,158,11,0.12);
+  border-color: var(--amber); color: var(--amber);
+}
+
+/* ── Empty state ────────────────────────────────────────────────── */
+.notes-empty {
+  text-align: center; padding: 4rem 2rem;
+  color: var(--text-secondary); font-size: 0.95rem;
+}
