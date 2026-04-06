@@ -38,16 +38,20 @@ nltk.download('punkt_tab'); \
 nltk.download('stopwords'); \
 nltk.download('averaged_perceptron_tagger')"
 
-# Pre-download BART + SBERT so first request isn't slow
-# This bakes the models into the image (~2GB) — comment out if image size matters
+# Pre-download models so first request isn't slow
 RUN python -c "\
 from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('all-MiniLM-L6-v2')" || true
+SentenceTransformer('BAAI/bge-small-en-v1.5')" || true
 
 RUN python -c "\
-from transformers import BartTokenizer, BartForConditionalGeneration; \
-BartTokenizer.from_pretrained('facebook/bart-large-cnn'); \
-BartForConditionalGeneration.from_pretrained('facebook/bart-large-cnn')" || true
+from transformers import PegasusTokenizer, PegasusForConditionalGeneration; \
+PegasusTokenizer.from_pretrained('google/pegasus-xsum'); \
+PegasusForConditionalGeneration.from_pretrained('google/pegasus-xsum')" || true
+
+RUN python -c "\
+from transformers import T5ForConditionalGeneration, T5Tokenizer; \
+T5Tokenizer.from_pretrained('valhalla/t5-base-qg-hl'); \
+T5ForConditionalGeneration.from_pretrained('valhalla/t5-base-qg-hl')" || true
 
 # Copy app code
 COPY . .

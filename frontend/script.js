@@ -184,12 +184,16 @@ async function renderResult(type, data) {
   }
 
   if (type === "quiz" && data.questions) {
+    // Store questions for interactive mode
+    window._quizData = data.questions;
+    // Show preview list (read-only) + Start Quiz button
     document.getElementById("quizContent").innerHTML =
       data.questions.map((q, i) => `
-        <div class="quiz-item">
-          <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
-          <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
+        <div class="quiz-preview-item">
+          <span class="q-num">Q${i + 1}.</span>
+          <span>${escapeHtml(q.question)}</span>
         </div>`).join("");
+    document.getElementById("btnStartQuiz").style.display = "inline-flex";
     await saveToFirestore({ quiz: data.questions });
   }
 
@@ -359,12 +363,14 @@ window.restoreSession = function (session) {
 
   if (session.quiz?.length) {
     document.getElementById("result-quiz").style.display = "block";
+    window._quizData = session.quiz;
     document.getElementById("quizContent").innerHTML =
       session.quiz.map((q, i) => `
-        <div class="quiz-item">
-          <div class="quiz-q"><span class="q-num">Q${i + 1}.</span>${escapeHtml(q.question)}</div>
-          <div class="quiz-a"><span>→</span>${escapeHtml(q.answer)}</div>
+        <div class="quiz-preview-item">
+          <span class="q-num">Q${i + 1}.</span>
+          <span>${escapeHtml(q.question)}</span>
         </div>`).join("");
+    document.getElementById("btnStartQuiz").style.display = "inline-flex";
   }
 
   if (session.audioB64) {
@@ -434,4 +440,138 @@ function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+// ─── INTERACTIVE QUIZ ENGINE ─────────────────────────────────────
+
+let _quizIndex  = 0;
+let _quizScore  = 0;
+let _quizAnswered = false;
+
+window.startQuiz = function () {
+  if (!window._quizData || !window._quizData.length) {
+    showToast("No quiz data available.", "error"); return;
+  }
+  _quizIndex    = 0;
+  _quizScore    = 0;
+  _quizAnswered = false;
+  document.getElementById("quizModal").style.display = "flex";
+  document.body.style.overflow = "hidden";
+  renderQuestion();
+};
+
+window.closeQuiz = function () {
+  document.getElementById("quizModal").style.display = "none";
+  document.body.style.overflow = "";
+};
+
+function renderQuestion() {
+  const questions = window._quizData;
+  const q         = questions[_quizIndex];
+  const total     = questions.length;
+  _quizAnswered   = false;
+
+  // Progress
+  const pct = (_quizIndex / total) * 100;
+  document.getElementById("quizProgressBar").style.width = pct + "%";
+  document.getElementById("quizCounter").textContent = `${_quizIndex + 1} / ${total}`;
+
+  // Question text
+  document.getElementById("quizQuestion").textContent = q.question;
+
+  // Options
+  const optionsEl = document.getElementById("quizOptions");
+  const labels    = ["A", "B", "C", "D"];
+  optionsEl.innerHTML = q.options.map((opt, i) => `
+    <button class="quiz-option" data-index="${i}" onclick="selectOption(${i})">
+      <span class="quiz-option-label">${labels[i]}</span>
+      <span class="quiz-option-text">${escapeHtml(opt)}</span>
+    </button>`).join("");
+
+  // Hide feedback
+  const fb = document.getElementById("quizFeedback");
+  fb.style.display = "none";
+  document.getElementById("quizFeedbackInner").innerHTML = "";
+}
+
+window.selectOption = function (selectedIdx) {
+  if (_quizAnswered) return;
+  _quizAnswered = true;
+
+  const q           = window._quizData[_quizIndex];
+  const correctIdx  = q.correct;
+  const isCorrect   = selectedIdx === correctIdx;
+  const labels      = ["A", "B", "C", "D"];
+
+  if (isCorrect) _quizScore++;
+
+  // Style the option buttons
+  document.querySelectorAll(".quiz-option").forEach((btn, i) => {
+    btn.disabled = true;
+    if (i === correctIdx) {
+      btn.classList.add("correct");
+    } else if (i === selectedIdx && !isCorrect) {
+      btn.classList.add("incorrect");
+    }
+  });
+
+  // Show feedback
+  const fb      = document.getElementById("quizFeedback");
+  const fbInner = document.getElementById("quizFeedbackInner");
+  const btnNext = document.getElementById("btnNext");
+  fb.style.display = "block";
+
+  if (isCorrect) {
+    fbInner.innerHTML = `
+      <div class="feedback-correct">
+        ✅ Correct!
+      </div>`;
+    // Auto-advance after 1.5s on correct answer
+    setTimeout(() => {
+      if (_quizAnswered) nextQuestion();
+    }, 1500);
+    btnNext.style.display = "none";
+  } else {
+    fbInner.innerHTML = `
+      <div class="feedback-incorrect">
+        ❌ Incorrect. The correct answer is <strong>${labels[correctIdx]}. ${escapeHtml(q.answer)}</strong>
+      </div>
+      <div class="feedback-reasoning">
+        💡 ${escapeHtml(q.reasoning)}
+      </div>`;
+    btnNext.style.display = "inline-block";
+  }
+};
+
+window.nextQuestion = function () {
+  _quizIndex++;
+  const total = window._quizData.length;
+
+  if (_quizIndex >= total) {
+    showFinalScore(total);
+  } else {
+    renderQuestion();
+  }
+};
+
+function showFinalScore(total) {
+  const pct = Math.round((_quizScore / total) * 100);
+  let grade = "🔴 Keep studying!";
+  if (pct >= 90) grade = "🏆 Excellent!";
+  else if (pct >= 70) grade = "✅ Good job!";
+  else if (pct >= 50) grade = "📚 Not bad, review the summary.";
+
+  document.getElementById("quizProgressBar").style.width = "100%";
+  document.getElementById("quizCounter").textContent = `${total} / ${total}`;
+  document.getElementById("quizQuestion").innerHTML = `
+    <div class="quiz-final-score">
+      <div class="quiz-score-number">${_quizScore} / ${total}</div>
+      <div class="quiz-score-pct">${pct}%</div>
+      <div class="quiz-score-grade">${grade}</div>
+    </div>`;
+  document.getElementById("quizOptions").innerHTML = `
+    <button class="btn-generate-all" style="margin-top:1rem" onclick="startQuiz()">
+      🔄 Retake Quiz
+    </button>`;
+  document.getElementById("quizFeedback").style.display = "none";
 }

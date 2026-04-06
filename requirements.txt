@@ -12,6 +12,7 @@ python-multipart>=0.0.6
 torch==2.2.0+cpu
 transformers>=4.35.0
 sentence-transformers>=2.2.2
+sentencepiece>=0.1.99             # Required by Pegasus + T5 tokenizers
 accelerate>=0.24.0
 scikit-learn>=1.3.0
 
