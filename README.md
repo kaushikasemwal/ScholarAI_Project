@@ -262,27 +262,6 @@ Required GitHub Secrets:
 | `HF_SPACE_URL` | `https://your-username-scholarai-backend.hf.space` |
 | `FIREBASE_CONFIG_JSON` | Firebase config as a single-line JSON string |
 
-
-The Jenkins pipeline runs 6 stages on every push to `main`:
-
-```
-Checkout → pytest Tests → Docker Build → Push to ACR → Deploy to Azure → Smoke Test
-```
-
-**Azure Resources:**
-- Resource Group: `ScholarAI-RG` (Central India)
-- Container Registry: `scholarairegistry.azurecr.io`
-- Container Apps Environment: `scholarai-env`
-- Container App: `scholarai-backend` (1–2 replicas, 1 vCPU, 2GB RAM)
-- Static Web App: `lively-hill-0d6889900.1.azurestaticapps.net`
-
-Jenkins Credentials required (add in Manage Jenkins → Credentials):
-- `AZURE_CLIENT_ID` — Service Principal App ID
-- `AZURE_CLIENT_SECRET` — Service Principal Secret
-- `AZURE_TENANT_ID` — Azure Tenant ID
-- `AZURE_SUBSCRIPTION_ID` — Subscription ID
-- `AES_KEY` — AES-256 encryption key for the app
-
 ---
 
 ## API Reference
