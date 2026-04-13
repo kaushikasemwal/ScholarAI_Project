@@ -13,7 +13,7 @@ import {
   query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://kaushikasemwal-scholarai-backend.hf.space";
 
 // ─── STATE ────────────────────────────────────────────────────────
 let currentUser    = null;
