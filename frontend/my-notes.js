@@ -5,7 +5,7 @@
 
 import { auth, db } from "./firebase-config.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { collection, getDocs, query, where, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { collection, getDocs, deleteDoc, doc, query, where, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 let allSessions  = [];
 let activeFilter = "all";
@@ -70,20 +70,23 @@ function renderGrid(sessions) {
       : "Unknown date";
     const size = s.fileSize ? formatBytes(s.fileSize) : "";
     return `
-      <a class="history-card" href="notes.html?id=${s.id}">
-        <div class="history-card-icon">📄</div>
-        <div class="history-card-info">
-          <div class="history-card-name">${escapeHtml(s.fileName || "Untitled")}</div>
-          <div class="history-card-date">${date}${size ? " · " + size : ""}</div>
-          <div class="history-card-badges">
-            ${s.summary  ? '<span class="badge badge-green">Summary</span>' : ""}
-            ${s.quiz     ? '<span class="badge badge-blue">Quiz</span>'    : ""}
-            ${s.audioB64 ? '<span class="badge badge-amber">Audio</span>'  : ""}
-            ${s.videoUrl ? '<span class="badge badge-teal">Video</span>'   : ""}
+      <div class="history-card-wrapper">
+        <a class="history-card" href="notes.html?id=${s.id}">
+          <div class="history-card-icon">📄</div>
+          <div class="history-card-info">
+            <div class="history-card-name">${escapeHtml(s.fileName || "Untitled")}</div>
+            <div class="history-card-date">${date}${size ? " · " + size : ""}</div>
+            <div class="history-card-badges">
+              ${s.summary  ? '<span class="badge badge-green">Summary</span>' : ""}
+              ${s.quiz     ? '<span class="badge badge-blue">Quiz</span>'    : ""}
+              ${s.audioB64 ? '<span class="badge badge-amber">Audio</span>'  : ""}
+              ${s.videoUrl ? '<span class="badge badge-teal">Video</span>'   : ""}
+            </div>
           </div>
-        </div>
-        <div class="history-card-arrow">→</div>
-      </a>`;
+          <div class="history-card-arrow">→</div>
+        </a>
+        <button class="btn-delete-note" title="Delete note" onclick="deleteNote('${s.id}', this)">🗑</button>
+      </div>`;
   }).join("");
 }
 
@@ -113,6 +116,25 @@ function applyFilters() {
   });
   renderGrid(filtered);
 }
+
+window.deleteNote = async function (sessionId, btn) {
+  if (!confirm("Delete this note? This cannot be undone.")) return;
+  btn.disabled = true;
+  btn.textContent = "⏳";
+  try {
+    await deleteDoc(doc(db, "sessions", sessionId));
+    allSessions = allSessions.filter(s => s.id !== sessionId);
+    applyFilters();
+    if (allSessions.length === 0) {
+      document.getElementById("notesGrid").style.display = "none";
+      document.getElementById("notesEmpty").style.display = "block";
+    }
+  } catch (err) {
+    alert("Failed to delete: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "🗑";
+  }
+};
 
 function formatBytes(b) {
   if (b < 1024) return b + " B";
