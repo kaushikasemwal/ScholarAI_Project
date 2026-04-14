@@ -4,7 +4,7 @@
  * Results are NOT rendered here — they live on notes.html.
  */
 
-import { auth, db } from "./firebase-config.js";
+import { auth, db, storage } from "./firebase-config.js";
 import {
   onAuthStateChanged, signOut
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
@@ -12,6 +12,9 @@ import {
   collection, addDoc, getDocs, updateDoc,
   query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import {
+  ref, uploadBytes, getDownloadURL
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 const API_BASE = "https://kaushikasemwal-scholarai-backend.hf.space";
 
@@ -192,7 +195,7 @@ async function persistResult(type, data) {
   }
 
   if (type === "video" && data.video_url) {
-    await saveToFirestore({ videoUrl: `${API_BASE}${data.video_url}` });
+    await saveVideoToStorage(`${API_BASE}${data.video_url}`);
   }
 }
 
@@ -214,6 +217,28 @@ async function saveAudioAsBase64(url) {
     reader.readAsDataURL(blob);
   } catch (err) {
     console.warn("Could not save audio:", err.message);
+  }
+}
+
+// ─── VIDEO → FIREBASE STORAGE → FIRESTORE ────────────────────────
+async function saveVideoToStorage(url) {
+  try {
+    showToast("Uploading video to storage…");
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("Could not fetch video from backend");
+    const blob = await resp.blob();
+    if (blob.size < 10_000) throw new Error("Video file too small, likely failed");
+
+    const uid      = currentUser.uid;
+    const docId    = currentDocRef.id;
+    const videoRef = ref(storage, `videos/${uid}/${docId}.mp4`);
+    await uploadBytes(videoRef, blob, { contentType: "video/mp4" });
+    const downloadUrl = await getDownloadURL(videoRef);
+    await saveToFirestore({ videoUrl: downloadUrl });
+    showToast("Video saved.", "success");
+  } catch (err) {
+    console.warn("Could not save video to storage:", err.message);
+    showToast("Video generated but could not be saved permanently.", "error");
   }
 }
 

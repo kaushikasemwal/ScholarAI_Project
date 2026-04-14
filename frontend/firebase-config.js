@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getStorage } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 const firebaseConfig = {
   apiKey:            "AIzaSyB0pUDaydWCOHq0-gnDpmiRYTy3sP4Oix0",
@@ -14,9 +15,7 @@ const firebaseConfig = {
 const app      = initializeApp(firebaseConfig);
 const auth     = getAuth(app);
 const db       = getFirestore(app);
+const storage  = getStorage(app);
 const provider = new GoogleAuthProvider();
 
-// Storage is NOT used — requires paid plan.
-// Audio is stored as base64 in Firestore. Video URL is stored as a string.
-
-export { auth, db, provider };
+export { auth, db, storage, provider };
