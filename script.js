@@ -204,14 +204,11 @@ async function saveAudioAsBase64(url) {
     const blob = await resp.blob();
     if (blob.size < 500) return;
     if (blob.size > 900_000) {
-      await saveToFirestore({ audioB64: url }); // store URL as fallback
+      await saveToFirestore({ audioB64: url });
       return;
     }
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      await saveToFirestore({ audioB64: reader.result });
-    };
-    reader.readAsDataURL(blob);
+    const b64 = await blobToBase64(blob);
+    await saveToFirestore({ audioB64: b64 });
   } catch (err) {
     console.warn("Could not save audio:", err.message);
   }
@@ -226,21 +223,27 @@ async function saveVideoAsBase64(url) {
     const blob = await resp.blob();
     if (blob.size < 10_000) throw new Error("Video too small, likely failed");
     if (blob.size > 900_000) {
-      // Too large for Firestore — store the HF URL as fallback (may expire)
       await saveToFirestore({ videoUrl: url });
       showToast("Video saved (temporary link).", "success");
       return;
     }
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      await saveToFirestore({ videoUrl: reader.result });
-      showToast("Video saved.", "success");
-    };
-    reader.readAsDataURL(blob);
+    const b64 = await blobToBase64(blob);
+    await saveToFirestore({ videoUrl: b64 });
+    showToast("Video saved.", "success");
   } catch (err) {
     console.warn("Could not save video:", err.message);
     showToast("Video generated but could not be saved.", "error");
   }
+}
+
+// ─── BLOB → BASE64 HELPER ────────────────────────────────────────
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror  = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 // ─── FIRESTORE SAVE ──────────────────────────────────────────────
