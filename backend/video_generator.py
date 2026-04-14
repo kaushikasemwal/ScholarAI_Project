@@ -20,15 +20,15 @@ import nltk
 
 log = logging.getLogger(__name__)
 
-VIDEO_W, VIDEO_H   = 1280, 720
-FPS                = 24
+VIDEO_W, VIDEO_H   = 640, 360
+FPS                = 10
 WORDS_PER_MINUTE   = 150          # narration reading speed
-MIN_SLIDE_DURATION = 5            # seconds
-MAX_SLIDE_DURATION = 20           # seconds
-PADDING_SECONDS    = 2            # extra buffer per slide
+MIN_SLIDE_DURATION = 4            # seconds
+MAX_SLIDE_DURATION = 10           # seconds
+PADDING_SECONDS    = 1            # extra buffer per slide
 
-FONT_SIZE_TITLE = 36
-FONT_SIZE_BODY  = 28
+FONT_SIZE_TITLE = 22
+FONT_SIZE_BODY  = 16
 
 BG_COLOR     = (11, 17, 32)
 ACCENT_COLOR = (245, 158, 11)
@@ -206,7 +206,8 @@ def generate_video(summary: str, output_path: str) -> str:
             temp_audiofile=output_path + ".temp.m4a",
             remove_temp=True,
             logger=None,
-            verbose=False
+            verbose=False,
+            ffmpeg_params=["-crf", "35", "-preset", "ultrafast", "-vf", "scale=640:360"]
         )
 
         if audio_clip is not None:
