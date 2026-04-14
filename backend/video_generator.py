@@ -134,6 +134,15 @@ def _segment_summary(summary: str, sentences_per_slide: int = 3) -> List[Tuple[s
 
 def generate_video(summary: str, output_path: str) -> str:
     try:
+        # Point moviepy at the imageio-ffmpeg bundled binary so ffmpeg
+        # doesn't need to be installed system-wide / in PATH.
+        try:
+            import imageio_ffmpeg
+            import moviepy.config as mpy_conf
+            mpy_conf.change_settings({"FFMPEG_BINARY": imageio_ffmpeg.get_ffmpeg_exe()})
+        except Exception as _fe:
+            log.warning(f"Could not set bundled ffmpeg path: {_fe}")
+
         from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
         import numpy as np
 
@@ -173,8 +182,12 @@ def generate_video(summary: str, output_path: str) -> str:
                 video_dur  = final.duration
 
                 if audio_dur < video_dur:
-                    from moviepy.audio.fx.all import audio_loop
-                    audio_clip = audio_loop(audio_clip, duration=video_dur)
+                    try:
+                        from moviepy.audio.fx.all import audio_loop
+                        audio_clip = audio_loop(audio_clip, duration=video_dur)
+                    except Exception:
+                        # Fallback: just let the audio end early
+                        pass
                 else:
                     audio_clip = audio_clip.subclip(0, video_dur)
 
