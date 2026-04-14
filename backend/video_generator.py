@@ -202,12 +202,12 @@ def generate_video(summary: str, output_path: str) -> str:
             output_path,
             fps=FPS,
             codec="libx264",
-            audio_codec="aac",
-            temp_audiofile=output_path + ".temp.m4a",
+            audio_codec="aac" if audio_clip is not None else None,
+            temp_audiofile=output_path + ".temp.m4a" if audio_clip is not None else None,
             remove_temp=True,
             logger=None,
             verbose=False,
-            ffmpeg_params=["-crf", "35", "-preset", "ultrafast", "-vf", "scale=640:360"]
+            ffmpeg_params=["-crf", "35", "-preset", "ultrafast"]
         )
 
         if audio_clip is not None:

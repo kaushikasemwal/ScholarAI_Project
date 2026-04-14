@@ -29,6 +29,7 @@ python-pptx>=0.6.21
 # ── Audio / Video ────────────────────────────────────────────────
 gTTS>=2.4.0
 moviepy>=1.0.3
+imageio-ffmpeg>=0.4.9
 Pillow>=10.0.0
 # pyttsx3 is Windows-only — not included for Linux/HF Spaces deployment
 
